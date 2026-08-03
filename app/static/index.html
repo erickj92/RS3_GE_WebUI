@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RS3 Graph — Market Watch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="watch">
+  <header class="topbar">
+    <h1 class="logo">📈 RS3 Graph</h1>
+    <div class="controls">
+      <select id="market-select" title="Market" aria-label="Market"></select>
+      <select id="tz-select" title="Timezone" aria-label="Timezone">
+        <option value="America/New_York">EST (America/New_York)</option>
+        <option value="America/Chicago">CST (America/Chicago)</option>
+        <option value="America/Denver">MST (America/Denver)</option>
+        <option value="America/Los_Angeles">PST (America/Los_Angeles)</option>
+        <option value="UTC">UTC</option>
+        <option value="Europe/London">GMT (Europe/London)</option>
+      </select>
+      <button id="refresh-btn" class="btn primary" type="button">⟳ Refresh</button>
+      <span id="refresh-status" class="status"></span>
+    </div>
+    <nav class="nav-links">
+      <a href="/admin" class="btn">⚙ Admin</a>
+    </nav>
+  </header>
+
+  <main>
+    <div id="market-meta" class="market-meta"></div>
+    <div id="charts"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+services:
+  web:
+    build: .
+    container_name: rs3graph_webui
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data      # SQLite database (persistent)
+      - ./icons:/app/icons    # cached item icons (persistent)
+    restart: unless-stopped

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RS3 Graph — Admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="admin">
+  <header class="topbar">
+    <h1 class="logo">📈 RS3 Graph <span class="muted">Admin</span></h1>
+    <nav class="nav-links">
+      <a href="/" class="btn">← Market Watch</a>
+    </nav>
+  </header>
+
+  <main class="admin-layout">
+    <aside class="panel">
+      <h2>Markets</h2>
+      <form id="new-market-form" class="inline-form">
+        <input id="new-market-name" type="text" placeholder="New market name" maxlength="100" required>
+        <button class="btn primary" type="submit">+ Add</button>
+      </form>
+      <ul id="market-list" class="market-list"></ul>
+      <p class="muted small">Click a market to edit its items. Delete removes the market and its price data.</p>
+    </aside>
+
+    <section class="panel">
+      <h2 id="panel-title">Select a market</h2>
+
+      <form id="add-item-form" class="inline-form">
+        <input id="add-item-id" type="number" placeholder="Item ID (e.g. 4151)" min="1" step="1" required>
+        <button class="btn" type="button" id="lookup-btn">🔍 Lookup</button>
+      </form>
+      <div id="lookup-preview" class="lookup-preview" hidden>
+        <img id="lookup-icon" class="mini-icon" alt="">
+        <span id="lookup-name"></span>
+        <button id="confirm-add-btn" class="btn primary" type="button">+ Add to market</button>
+      </div>
+      <span id="lookup-error" class="error"></span>
+
+      <form id="import-form" class="inline-form">
+        <input id="import-file" type="file" accept=".txt,text/plain">
+        <button class="btn" type="submit">📥 Import .txt</button>
+      </form>
+      <span id="import-status" class="error"></span>
+
+      <table id="items-table" class="items-table">
+        <thead>
+          <tr><th></th><th>Name</th><th>ID</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
