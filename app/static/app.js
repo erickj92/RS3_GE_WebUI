@@ -195,10 +195,25 @@
     });
   }
 
+  // Hour-only formatter for the x-axis tick labels (HH, no minutes).
+  function getHourFormatter(tz) {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour12: false,
+      hour: '2-digit',
+    });
+  }
+
   // Format a timestamp in the currently selected timezone. (Named estTime
   // for historical reasons; it now honors currentTz.)
   function estTime(ms) {
     return getTimeFormatter(currentTz).format(new Date(ms));
+  }
+
+  // Hour-only variant used on the time axis (the tooltip titles keep the
+  // full HH:MM so the exact hovered slot is still identifiable).
+  function estTimeHour(ms) {
+    return getHourFormatter(currentTz).format(new Date(ms));
   }
 
   // Get the timezone abbreviation for display ("EST", "CST", "UTC", …).
@@ -301,7 +316,7 @@
       offset: false,
       ticks: {
         color: COLORS.text,
-        callback: (v) => estTime(v),
+        callback: (v) => estTimeHour(v),
         font: { size: 13 },
         maxRotation: 0,
         autoSkip: true,

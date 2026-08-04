@@ -295,8 +295,9 @@ def cleanup_old(item_id: int, cutoff_ts: int) -> None:
 def fill_gaps(series: list) -> list:
     """Replicate the Python script's `_fill_gaps`.
 
-    Forward-fill missing values, then back-fill leading gaps so the line is
-    continuous from the first known value to the last known value.
+    Forward-fill missing values, then back-fill leading gaps so the series is
+    continuous from the first known value to the last known value.  Used for
+    volumes: a genuinely missing slot carries the last known value.
     """
     filled: list = []
     last = None
@@ -316,15 +317,74 @@ def fill_gaps(series: list) -> list:
     return filled
 
 
+def interp_gaps(series: list, timestamps: list | None = None) -> list:
+    """Gap-fill a price series with linear interpolation in TIME space.
+
+    Missing values between two real data points are placed ON the straight
+    line connecting them (in (time, value) space), so the rendered line
+    goes directly from point to point with the correct slope instead of
+    going flat and then snapping to the new value (the old forward-fill
+    behavior).  Leading gaps are back-filled with the first real value and
+    trailing gaps keep the last real value (there is no second endpoint to
+    interpolate toward yet).
+
+    Interpolation is weighted by *timestamps*, not by array index: the DB
+    can be missing entire 5-minute slots (irregular spacing), and
+    index-based interpolation would place the filled values at the wrong
+    time positions, making the drawn line kink/curve instead of running
+    straight from point to point.  Falls back to index spacing if no
+    timestamps are supplied.
+    """
+    n = len(series)
+    out = list(series)
+
+    first_idx = next((i for i, v in enumerate(out) if v is not None), None)
+    if first_idx is None:
+        return out  # nothing real at all — leave as-is
+    for i in range(first_idx):
+        out[i] = out[first_idx]  # back-fill leading gap
+
+    prev = first_idx
+    for i in range(first_idx + 1, n):
+        if out[i] is None:
+            continue
+        if i > prev + 1:
+            # Linearly interpolate every slot between the two real points,
+            # weighted by time so each filled value sits exactly on the
+            # straight line between the endpoints.
+            a, b = out[prev], out[i]
+            if timestamps is not None and timestamps[i] != timestamps[prev]:
+                for j in range(prev + 1, i):
+                    frac = ((timestamps[j] - timestamps[prev])
+                            / (timestamps[i] - timestamps[prev]))
+                    out[j] = a + (b - a) * frac
+            else:
+                step = (b - a) / (i - prev)
+                for j in range(prev + 1, i):
+                    out[j] = a + step * (j - prev)
+        prev = i
+
+    for i in range(prev + 1, n):
+        out[i] = out[prev]  # trailing gap keeps the last real value
+
+    return out
+
+
 def get_series(item_id: int) -> dict:
     """Return chart-ready parallel arrays for *item_id*.
 
     - timestamps: epoch ms (EST rendering happens client-side)
-    - highPrice / lowPrice: gap-filled for continuous lines
-    - highVolume / lowVolume: forward-filled (fill_gaps) like prices, so
-      missing points carry the last known value instead of showing 0
+    - highPrice / lowPrice: gap-filled for continuous lines; gaps between
+      real points are linearly interpolated so lines run straight from
+      point to point (no flat-then-snap)
+    - highVolume / lowVolume: real API volumes kept as-is (including real
+      zeros — a 0 in one direction must NOT be replaced by the other
+      direction's value), only genuinely missing slots are forward-filled
     - highReal / lowReal / highVolReal / lowVolReal: masks telling the
       frontend where real API data exists (markers + tooltip "N min ago").
+      Volume masks depend ONLY on the volume column: the wiki API reports
+      volume 0 for a direction with no trades even when that side's price
+      is null, and that real 0 must be displayed, not gap-filled.
     """
     conn = get_conn()
     with _lock:
@@ -349,17 +409,23 @@ def get_series(item_id: int) -> dict:
         timestamps.append(r["timestamp"] * 1000)
         high.append(float(hp) if hp is not None else None)
         low.append(float(lp) if lp is not None else None)
-        hv.append(float(hvol) if (hp is not None and hvol is not None) else None)
-        lv.append(float(lvol) if (lp is not None and lvol is not None) else None)
+        # A volume is real whenever the API reported it, INDEPENDENTLY of
+        # whether the matching price is present.  The wiki API returns a
+        # real 0 for a direction with no trades in that slot (e.g.
+        # high_volume=1, low_volume=0), so a 0 must be kept and displayed
+        # as 0 — never overwritten with the other direction's value or
+        # gap-filled from a neighbor.
+        hv.append(float(hvol) if hvol is not None else None)
+        lv.append(float(lvol) if lvol is not None else None)
         high_real.append(hp is not None)
         low_real.append(lp is not None)
-        hv_real.append(hp is not None and hvol is not None)
-        lv_real.append(lp is not None and lvol is not None)
+        hv_real.append(hvol is not None)
+        lv_real.append(lvol is not None)
 
     return {
         "timestamps": timestamps,
-        "highPrice": fill_gaps(high),
-        "lowPrice": fill_gaps(low),
+        "highPrice": interp_gaps(high, timestamps),
+        "lowPrice": interp_gaps(low, timestamps),
         "highVolume": fill_gaps(hv),
         "lowVolume": fill_gaps(lv),
         "highReal": high_real,
