@@ -256,20 +256,22 @@
     return ` (${hrs < 10 ? hrs.toFixed(1) : Math.round(hrs)} Hours Ago)`;
   }
 
-  /* "(N Minutes Ago)" / "(N Hours Ago)" note when a series has no real
-     value at this index. Looks back to the last known value, then forward
-     (leading gap filled from the first known value).
-     Only fires when the real-mask is FALSE (data genuinely missing/None
-     from the API). A real value of 0 must NOT get an "ago" suffix. */
-  function missingNote(S, real, i) {
-    if (real[i]) return ''; // real value (even 0) → never annotate
+  /* Actual value + "(N Minutes/Hours Ago)" note for a series at slot i.
+     When the slot has a real value it is returned as-is (never annotated,
+     even when that value is 0). When the slot is gap-filled (real-mask
+     FALSE — data genuinely missing/None from the API), the LAST REAL value
+     BEFORE the slot is returned instead of the interpolated point value,
+     annotated with how long ago it was recorded; leading gaps (no real
+     value behind) fall back to the first real value after the slot. */
+  function actualValue(S, real, arr, i) {
+    if (real[i]) return { value: arr[i], note: '' };
     for (let j = i - 1; j >= 0; j--) {
-      if (real[j]) return ago(S.timestamps[i] - S.timestamps[j]);
+      if (real[j]) return { value: arr[j], note: ago(S.timestamps[i] - S.timestamps[j]) };
     }
     for (let j = i + 1; j < S.timestamps.length; j++) {
-      if (real[j]) return ago(S.timestamps[j] - S.timestamps[i]);
+      if (real[j]) return { value: arr[j], note: ago(S.timestamps[j] - S.timestamps[i]) };
     }
-    return '';
+    return { value: null, note: '' };
   }
 
   /* Convert a parallel value array into Chart.js {x, y} points (linear x). */
@@ -278,15 +280,116 @@
   }
 
   const tooltipStyle = {
-    backgroundColor: '#2a2a2a',
-    titleColor: '#e8e8e8',
-    bodyColor: COLORS.text,
-    borderColor: 'rgba(171,171,171,0.4)',
+    backgroundColor: '#ffffff',
+    titleColor: '#1a1a1a',
+    bodyColor: '#333333',
+    borderColor: 'rgba(0,0,0,0.15)',
     borderWidth: 1,
     padding: 10,
     titleFont: { size: 14 },
     bodyFont: { size: 13 },
   };
+
+  /* ── Cursor-following tooltip ────────────────────────────────────────
+     Rendered as ONE shared DOM element via Chart.js's external tooltip
+     hook (tooltip.enabled:false so Chart.js never paints its own box).
+     This lets the tooltip follow the mouse cursor with a fixed offset
+     instead of being anchored to the hovered data point. Every chart
+     stores its series on chart.$series; the handler always shows the four
+     lines in order — Buy Price / Sell Price / Buy Vol / Sell Vol — each
+     with its colored dot, using ACTUAL last-known values (not the
+     interpolated gap-fill) for missing data. */
+  const TOOLTIP_OFFSET = 15;
+
+  const tooltipEl = (() => {
+    const el = document.createElement('div');
+    el.style.cssText = [
+      'position:fixed',
+      'z-index:9999',
+      'pointer-events:none',
+      'background:#ffffff',
+      'color:#333333',
+      'border:1px solid rgba(0,0,0,0.15)',
+      'border-radius:6px',
+      'padding:10px 12px',
+      'box-shadow:0 4px 14px rgba(0,0,0,0.3)',
+      'font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif',
+      'white-space:nowrap',
+      'opacity:0',
+      'transition:opacity 0.12s ease',
+      'left:0',
+      'top:0',
+    ].join(';');
+    document.body.appendChild(el);
+    return el;
+  })();
+
+  let tooltipMouse = { x: 0, y: 0 }; // last cursor position over a chart
+  let tooltipShown = false;
+
+  // Place the tooltip ~15px right/below the cursor, flipping to the other
+  // side when it would run off the viewport edge.
+  function positionExternalTooltip() {
+    const w = tooltipEl.offsetWidth;
+    const h = tooltipEl.offsetHeight;
+    let left = tooltipMouse.x + TOOLTIP_OFFSET;
+    let top = tooltipMouse.y + TOOLTIP_OFFSET;
+    if (left + w > window.innerWidth - 8) left = tooltipMouse.x - w - TOOLTIP_OFFSET;
+    if (top + h > window.innerHeight - 8) top = tooltipMouse.y - h - TOOLTIP_OFFSET;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+  }
+
+  // Track the cursor while it is over any chart so the tooltip follows it
+  // smoothly even between Chart.js hover updates (Chart.js only re-renders
+  // the tooltip when the hovered data index changes).
+  document.addEventListener('mousemove', (e) => {
+    const t = e.target;
+    if (!t || !t.closest || !t.closest('.chart-wrap')) return;
+    tooltipMouse.x = e.clientX;
+    tooltipMouse.y = e.clientY;
+    if (tooltipShown) positionExternalTooltip();
+  });
+
+  // One tooltip line: colored dot + "Label: value GP(N Minutes Ago)".
+  function tooltipRow(label, info, suffix, color) {
+    return (
+      '<div style="display:flex;align-items:center;gap:8px;line-height:1.6">' +
+      '<span style="width:9px;height:9px;border-radius:50%;flex:0 0 auto;' +
+      'display:inline-block;background:' + color + '"></span>' +
+      '<span style="color:#333333">' + escapeHtml(label) + ': ' +
+      escapeHtml(fmtNum(info.value)) + suffix + escapeHtml(info.note) + '</span>' +
+      '</div>'
+    );
+  }
+
+  // Chart.js external tooltip handler (set via tooltip.external).
+  function renderExternalTooltip(context) {
+    const { chart, tooltip } = context;
+    if (!tooltip.opacity || !tooltip.dataPoints || !tooltip.dataPoints.length) {
+      tooltipEl.style.opacity = '0';
+      tooltipShown = false;
+      return;
+    }
+    const S = chart.$series;
+    if (!S) return;
+    const i = tooltip.dataPoints[0].dataIndex;
+    if (tooltipEl._chart !== chart || tooltipEl._index !== i) {
+      tooltipEl._chart = chart;
+      tooltipEl._index = i;
+      tooltipEl.innerHTML =
+        '<div style="color:#1a1a1a;font-size:14px;font-weight:600;margin-bottom:6px;' +
+        'padding-bottom:6px;border-bottom:1px solid rgba(0,0,0,0.1)">' +
+        escapeHtml(estTime(S.timestamps[i])) + '</div>' +
+        tooltipRow('Buy Price', actualValue(S, S.highReal, S.highPrice, i), ' GP', COLORS.green) +
+        tooltipRow('Sell Price', actualValue(S, S.lowReal, S.lowPrice, i), ' GP', COLORS.orange) +
+        tooltipRow('Buy Vol', actualValue(S, S.highVolReal, S.highVolume, i), '', COLORS.green) +
+        tooltipRow('Sell Vol', actualValue(S, S.lowVolReal, S.lowVolume, i), '', COLORS.orange);
+    }
+    tooltipEl.style.opacity = '1';
+    tooltipShown = true;
+    positionExternalTooltip();
+  }
 
   /* Shared x-axis config for both price and volume charts.
      - min snaps to the start of the hour before the first data point
@@ -412,7 +515,7 @@
       order: 1,
     });
 
-    return new Chart(canvas, {
+    const chart = new Chart(canvas, {
       type: 'line',
       data: {
         datasets: [buyLine, sellLine, mk(COLORS.green, S.highPrice, S.highReal), mk(COLORS.orange, S.lowPrice, S.lowReal)],
@@ -428,39 +531,15 @@
           legend: legendOpts('line'),
           tooltip: {
             ...tooltipStyle,
-            callbacks: {
-              title: (items) => estTime(S.timestamps[items[0].dataIndex]),
-              label: (ctx) => {
-                if (ctx.dataset.markerOnly) return null;
-                const i = ctx.dataIndex;
-                if (ctx.dataset.label === 'Buy Price') {
-                  return S.highReal[i]
-                    ? `Buy Price: ${fmtNum(ctx.parsed.y)} GP`
-                    : `Buy Price: ${fmtNum(ctx.parsed.y)} GP${missingNote(S, S.highReal, i)}`;
-                }
-                if (ctx.dataset.label === 'Sell Price') {
-                  return S.lowReal[i]
-                    ? `Sell Price: ${fmtNum(ctx.parsed.y)} GP`
-                    : `Sell Price: ${fmtNum(ctx.parsed.y)} GP${missingNote(S, S.lowReal, i)}`;
-                }
-                return null;
-              },
-              afterLabel: (ctx) => {
-                if (ctx.dataset.markerOnly || ctx.dataset.label !== 'Buy Price') return null;
-                const i = ctx.dataIndex;
-                const buyVol = S.highVolReal[i]
-                  ? `Buy Vol: ${fmtNum(S.highVolume[i])}`
-                  : `Buy Vol: ${fmtNum(S.highVolume[i])}${missingNote(S, S.highVolReal, i)}`;
-                const sellVol = S.lowVolReal[i]
-                  ? `Sell Vol: ${fmtNum(S.lowVolume[i])}`
-                  : `Sell Vol: ${fmtNum(S.lowVolume[i])}${missingNote(S, S.lowVolReal, i)}`;
-                return [buyVol, sellVol];
-              },
-            },
+            enabled: false,
+            position: 'nearest',
+            external: renderExternalTooltip,
           },
         },
       },
     });
+    chart.$series = S;
+    return chart;
   }
 
   /* ── Volume chart ─────────────────────────────────────────────────── */
@@ -476,7 +555,7 @@
     // line up exactly.
     const barThickness = 4;
 
-    return new Chart(canvas, {
+    const chart = new Chart(canvas, {
       type: 'bar',
       data: {
         datasets: [
@@ -533,36 +612,15 @@
           legend: legendOpts('rect'),
           tooltip: {
             ...tooltipStyle,
-            callbacks: {
-              title: (items) => estTime(S.timestamps[items[0].dataIndex]),
-              label: (ctx) => {
-                const i = ctx.dataIndex;
-                if (ctx.dataset.label === 'Buy Volume') {
-                  return S.highVolReal[i]
-                    ? `Buy Vol: ${fmtNum(ctx.parsed.y)}`
-                    : `Buy Vol: ${fmtNum(ctx.parsed.y)}${missingNote(S, S.highVolReal, i)}`;
-                }
-                return S.lowVolReal[i]
-                  ? `Sell Vol: ${fmtNum(-ctx.parsed.y)}`
-                  : `Sell Vol: ${fmtNum(-ctx.parsed.y)}${missingNote(S, S.lowVolReal, i)}`;
-              },
-              afterLabel: (ctx) => {
-                if (ctx.dataset.label !== 'Buy Volume') return null;
-                const i = ctx.dataIndex;
-                return [
-                  S.highReal[i]
-                    ? `Buy: ${fmtNum(S.highPrice[i])} GP`
-                    : `Buy: ${fmtNum(S.highPrice[i])} GP${missingNote(S, S.highReal, i)}`,
-                  S.lowReal[i]
-                    ? `Sell: ${fmtNum(S.lowPrice[i])} GP`
-                    : `Sell: ${fmtNum(S.lowPrice[i])} GP${missingNote(S, S.lowReal, i)}`,
-                ];
-              },
-            },
+            enabled: false,
+            position: 'nearest',
+            external: renderExternalTooltip,
           },
         },
       },
     });
+    chart.$series = S;
+    return chart;
   }
 
   /* ─────────────────────────────────────────────────────────────────────
