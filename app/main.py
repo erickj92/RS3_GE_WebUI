@@ -36,6 +36,12 @@ SEED_ITEM_IDS = [4151, 49430, 1519]  # from the original items.txt
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
+# Refresh policy: items are fetched in waves of CHUNK_SIZE, each wave run
+# concurrently by the API client's ThreadPoolExecutor (FETCH_CONCURRENCY
+# workers).  The small pause between waves keeps the request rate polite.
+REFRESH_CHUNK_SIZE = 20
+REFRESH_CHUNK_DELAY_S = 0.25
+
 
 def _set_job(job_id: str, **kwargs) -> None:
     with _jobs_lock:
@@ -72,34 +78,58 @@ def _run_refresh(job_id: str, market_id: int) -> None:
 
         cutoff = int(time.time()) - 24 * 3600  # keep only the last 24h
 
-        for idx, item in enumerate(items):
-            item_id = item["item_id"]
-            label = item["item_name"] or f"Item {item_id}"
-            _set_job(job_id, done=idx, current=label)
+        done = 0
+        for start in range(0, total, REFRESH_CHUNK_SIZE):
+            chunk = items[start : start + REFRESH_CHUNK_SIZE]
+            chunk_ids = [item["item_id"] for item in chunk]
+            chunk_end = min(start + len(chunk), total)
+            _set_job(
+                job_id,
+                done=done,
+                current=f"Fetching {start + 1}-{chunk_end} of {total}…",
+            )
 
-            data = api_client.fetch_timeseries(item_id)
-            rows = [
-                (
-                    e.get("timestamp"),
-                    e.get("avgHighPrice"),
-                    e.get("avgLowPrice"),
-                    e.get("highPriceVolume"),
-                    e.get("lowPriceVolume"),
+            # All network I/O for the wave runs concurrently (max 10 in
+            # flight); the DB writes below stay sequential and cheap.
+            data_map, failures = api_client.fetch_timeseries_many(chunk_ids)
+            if failures:
+                _set_job(
+                    job_id,
+                    current=f"{len(failures)} item(s) failed to fetch, keeping old data…",
                 )
-                for e in data
-            ]
-            db.replace_price_data(item_id, rows)
-            db.cleanup_old(item_id, cutoff)
 
-            # Keep stored names/icons in sync with the wiki mapping.
-            if mapping and item_id in mapping:
-                m = mapping[item_id]
-                db.update_item_meta(market_id, item_id, m["name"], m["icon"] or None)
-                if m.get("icon"):
-                    api_client.download_icon(m["icon"])
+            for item in chunk:
+                item_id = item["item_id"]
+                label = item["item_name"] or f"Item {item_id}"
+                done += 1
+                _set_job(job_id, done=done, current=label)
 
-            if idx < total - 1:
-                time.sleep(api_client.REQUEST_DELAY_S)  # be polite
+                # Skip failed fetches entirely so stored data is preserved.
+                data = data_map.get(item_id)
+                if data is None:
+                    continue
+                rows = [
+                    (
+                        e.get("timestamp"),
+                        e.get("avgHighPrice"),
+                        e.get("avgLowPrice"),
+                        e.get("highPriceVolume"),
+                        e.get("lowPriceVolume"),
+                    )
+                    for e in data
+                ]
+                db.replace_price_data(item_id, rows)
+                db.cleanup_old(item_id, cutoff)
+
+                # Keep stored names/icons in sync with the wiki mapping.
+                if mapping and item_id in mapping:
+                    m = mapping[item_id]
+                    db.update_item_meta(market_id, item_id, m["name"], m["icon"] or None)
+                    if m.get("icon"):
+                        api_client.download_icon(m["icon"])
+
+            if chunk_end < total:
+                time.sleep(REFRESH_CHUNK_DELAY_S)  # be polite between waves
 
         db.set_meta(f"market:{market_id}:last_refresh", _now_iso())
         _set_job(job_id, state="done", done=total, current="",

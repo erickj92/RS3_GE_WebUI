@@ -860,15 +860,35 @@
       opt.textContent = `${m.name} (${m.item_count})`;
       sel.appendChild(opt);
     }
-    sel.addEventListener('change', () => selectMarket(Number(sel.value)));
-    document.getElementById('tz-select').addEventListener('change', (e) => {
+
+    // Restore the last-selected timezone (rs3graph_tz) and market
+    // (rs3graph_market) from localStorage so a page refresh keeps them.
+    const tzSel = document.getElementById('tz-select');
+    const savedTz = localStorage.getItem('rs3graph_tz');
+    if (savedTz && [...tzSel.options].some((o) => o.value === savedTz)) {
+      currentTz = savedTz;
+      tzSel.value = savedTz;
+    }
+
+    sel.addEventListener('change', () => {
+      localStorage.setItem('rs3graph_market', String(sel.value));
+      selectMarket(Number(sel.value));
+    });
+    tzSel.addEventListener('change', (e) => {
       currentTz = e.target.value;
+      localStorage.setItem('rs3graph_tz', currentTz);
       reloadChartsWithNewTz();
     });
     document.getElementById('refresh-btn').addEventListener('click', refreshMarket);
 
     if (watchState.markets.length) {
-      await selectMarket(watchState.markets[0].id);
+      // Saved market wins if it still exists; otherwise fall back to the
+      // first market in the list.
+      const savedMarket = localStorage.getItem('rs3graph_market');
+      const target = watchState.markets.find((m) => String(m.id) === savedMarket)
+        || watchState.markets[0];
+      sel.value = target.id;
+      await selectMarket(target.id);
     } else {
       showEmpty('No markets yet. <a href="/admin">Create one in the Admin panel</a>.');
     }
