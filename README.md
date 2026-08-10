@@ -48,6 +48,29 @@ docker compose up -d --build
 `./data` (SQLite DB) and `./icons` (cached icons) are mounted as volumes so
 they survive container rebuilds.
 
+## Configuration (.env)
+
+A default `.env` file ships with the repo and works out of the box — no setup
+required. To customize, edit it (or copy it to `.env` and adjust values as
+needed) at the project root:
+
+```
+# RS3 Graph WebUI configuration
+# Copy this file to .env and customize values as needed.
+# The User-Agent string is sent with every API request to the RS Wiki.
+# The RS Wiki API requires a descriptive User-Agent per their guidelines.
+# Format: project-name/version (contact info; purpose)
+# Example: my-bot/1.0 (contact@example.com; personal price tracker)
+RS3GRAPH_USER_AGENT=rs3graph-webui/1.0 (RuneScape price tracker; contact: local)
+```
+
+- **`RS3GRAPH_USER_AGENT`** — the User-Agent string sent with every request to
+the RS Wiki Prices API. The default is polite and works out of the box; set it
+to your own project name plus contact info so the wiki admins can reach you if
+needed. If the variable is unset, the app falls back to a generic but polite
+default (`rs3graph-webui/1.0 (RuneScape price tracker)`).
+- The `.env` file is loaded automatically at startup (via `python-dotenv`).
+
 ## Local development
 
 ```bash

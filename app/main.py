@@ -19,12 +19,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import api_client, db
 from .models import ItemAdd, ItemImport, LookupOut, MarketCreate, MarketRename
+
+# Load .env from the project root so RS3GRAPH_USER_AGENT (and any future
+# settings) are picked up before the API client module reads them.
+load_dotenv()
 
 STATIC_DIR = Path(__file__).parent / "static"
 SEED_ITEM_IDS = [4151, 49430, 1519]  # from the original items.txt

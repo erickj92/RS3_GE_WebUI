@@ -6,6 +6,7 @@ fetches for a refresh run concurrently via ThreadPoolExecutor (the API does
 not accept multiple ids per request), so no per-request sleep is needed.
 """
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,7 +18,11 @@ from . import db
 
 API_BASE = "https://prices.runescape.wiki/api/v2/rs"
 WIKI_IMG_BASE = "https://runescape.wiki/images"
-USER_AGENT = "rs3graph-webui/1.0 (RuneScape price tracker; contact: local)"
+# User-Agent sent with every request to the RS Wiki API; override via the
+# RS3GRAPH_USER_AGENT environment variable (see .env / README.md).
+USER_AGENT = os.environ.get(
+    "RS3GRAPH_USER_AGENT", "rs3graph-webui/1.0 (RuneScape price tracker)"
+)
 LOOKBACK = "24h"
 
 # The timeseries endpoint takes ONE id per request (repeated id= params are

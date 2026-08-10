@@ -351,14 +351,23 @@
     if (tooltipShown) positionExternalTooltip();
   });
 
-  // One tooltip line: colored dot + "Label: value GP(N Minutes Ago)".
+  // One tooltip line: colored dot + label on the left, bold right-aligned
+  // value on the right. When the value is gap-filled, the "(N Minutes/Hours
+  // Ago)" note is appended to the LABEL ("Buy Price (5 Minutes Ago):");
+  // otherwise the label is plain ("Buy Price:").
   function tooltipRow(label, info, suffix, color) {
+    const labelText = info.note
+      ? escapeHtml(label) + escapeHtml(info.note) + ':'
+      : escapeHtml(label) + ': ';
     return (
-      '<div style="display:flex;align-items:center;gap:8px;line-height:1.6">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;line-height:1.6;min-width:200px">' +
+      '<span style="display:flex;align-items:center;gap:8px">' +
       '<span style="width:9px;height:9px;border-radius:50%;flex:0 0 auto;' +
-      'display:inline-block;background:' + color + '"></span>' +
-      '<span style="color:#333333">' + escapeHtml(label) + ': ' +
-      escapeHtml(fmtNum(info.value)) + suffix + escapeHtml(info.note) + '</span>' +
+      'background:' + color + '"></span>' +
+      '<span style="color:#333333">' + labelText + '</span>' +
+      '</span>' +
+      '<span style="color:#333333;font-weight:700;text-align:right">' +
+      escapeHtml(fmtNum(info.value)) + suffix + '</span>' +
       '</div>'
     );
   }
