@@ -41,6 +41,7 @@ and renders interactive, dark-themed charts in the browser.
 
 ```bash
 cd rs3graph_webui
+cp .env_sample .env   # optional: customize your User-Agent
 docker compose up -d --build
 # open http://localhost:8000  (admin: http://localhost:8000/admin)
 ```
@@ -50,9 +51,13 @@ they survive container rebuilds.
 
 ## Configuration (.env)
 
-A default `.env` file ships with the repo and works out of the box — no setup
-required. To customize, edit it (or copy it to `.env` and adjust values as
-needed) at the project root:
+A sample `.env_sample` file ships with the repo. Copy it to `.env` to customize:
+
+```bash
+cp .env_sample .env
+```
+
+Then edit `.env` as needed:
 
 ```
 # RS3 Graph WebUI configuration
