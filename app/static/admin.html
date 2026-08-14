@@ -40,9 +40,10 @@
       <span id="lookup-error" class="error"></span>
 
       <form id="import-form" class="inline-form">
-        <input id="import-file" type="file" accept=".txt,text/plain">
-        <button class="btn" type="submit">📥 Import .txt</button>
+        <input id="import-file" type="file" accept=".txt,.json,text/plain,application/json">
+        <button class="btn" type="submit">📥 Import IDs</button>
       </form>
+      <p class="muted small">One item ID per line, or a JSON array of IDs — e.g. ["57127","57022","28437"]. Auto-detected on upload.</p>
       <span id="import-status" class="error"></span>
 
       <table id="items-table" class="items-table">

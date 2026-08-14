@@ -913,8 +913,9 @@
     pendingAdd: null,
   };
 
-  /* Import a .txt file (one item ID per line) into the current market.
-     Order in the file is preserved as display order. */
+  /* Import a text file of item IDs into the current market. Accepts either
+     one item ID per line, or a JSON array of IDs (strings and/or numbers),
+     auto-detected on upload. Order in the file is preserved as display order. */
   async function importItemsFile(ev) {
     ev.preventDefault();
     const input = document.getElementById('import-file');
@@ -925,7 +926,7 @@
       return;
     }
     if (!input.files || !input.files.length) {
-      statusEl.textContent = 'Choose a .txt file first.';
+      statusEl.textContent = 'Choose a file first.';
       return;
     }
 
@@ -937,13 +938,36 @@
       return;
     }
 
-    const ids = [];
-    for (const line of text.split(/[\r\n]+/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const n = Number(trimmed.replace(/[^0-9]/g, ''));
-      if (!Number.isInteger(n) || n <= 0) continue;
-      ids.push(n);
+    const trimmed = text.trim();
+    let ids = null; // null = JSON-array parse not (successfully) used yet
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      // Format 2: JSON-like array of item IDs (strings and/or numbers).
+      try {
+        const parsed = JSON.parse(trimmed);
+        ids = [];
+        if (Array.isArray(parsed)) {
+          for (const el of parsed) {
+            const n = typeof el === 'string'
+              ? Number(el.replace(/[^0-9]/g, ''))
+              : Number(el);
+            if (!Number.isInteger(n) || n <= 0) continue;
+            ids.push(n);
+          }
+        }
+      } catch (err) {
+        ids = null; // JSON parse failed -> fall back to line-by-line
+      }
+    }
+    if (!ids) {
+      // Format 1 (fallback): one item ID per line.
+      ids = [];
+      for (const line of trimmed.split(/[\r\n]+/)) {
+        const lineTrimmed = line.trim();
+        if (!lineTrimmed) continue;
+        const n = Number(lineTrimmed.replace(/[^0-9]/g, ''));
+        if (!Number.isInteger(n) || n <= 0) continue;
+        ids.push(n);
+      }
     }
     if (!ids.length) {
       statusEl.textContent = 'No valid item IDs found in the file.';
