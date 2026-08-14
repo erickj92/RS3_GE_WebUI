@@ -941,15 +941,24 @@
     const trimmed = text.trim();
     let ids = null; // null = JSON-array parse not (successfully) used yet
     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      // Format 2: JSON-like array of item IDs (strings and/or numbers).
+      // Format 2: JSON-like array of item IDs. Accepts numbers, numeric
+      // strings, and objects with an id/item_id/itemId field (e.g. exports
+      // from the RS Wiki API).
       try {
         const parsed = JSON.parse(trimmed);
         ids = [];
         if (Array.isArray(parsed)) {
           for (const el of parsed) {
-            const n = typeof el === 'string'
-              ? Number(el.replace(/[^0-9]/g, ''))
-              : Number(el);
+            let raw;
+            if (el && typeof el === 'object') {
+              raw = el.id ?? el.item_id ?? el.itemId ?? el.itemID;
+            } else {
+              raw = el;
+            }
+            if (raw === undefined || raw === null) continue;
+            const n = typeof raw === 'string'
+              ? Number(raw.replace(/[^0-9]/g, ''))
+              : Number(raw);
             if (!Number.isInteger(n) || n <= 0) continue;
             ids.push(n);
           }
@@ -958,8 +967,9 @@
         ids = null; // JSON parse failed -> fall back to line-by-line
       }
     }
-    if (!ids) {
-      // Format 1 (fallback): one item ID per line.
+    if (!ids || !ids.length) {
+      // Format 1 (fallback): one item ID per line. Also used when the JSON
+      // parse succeeded but yielded no valid IDs (e.g. an object array).
       ids = [];
       for (const line of trimmed.split(/[\r\n]+/)) {
         const lineTrimmed = line.trim();
