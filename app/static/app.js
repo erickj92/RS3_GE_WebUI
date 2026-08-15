@@ -916,6 +916,17 @@
     await selectMarket(watchState.marketId);
   }
 
+  /* Stop any in-flight refresh progress poll.  The period-change trigger can
+     fire while a refresh is already being polled (manual button or another
+     period change), so a new poll must always stop the previous one instead
+     of stacking loops. */
+  function stopRefreshPoll() {
+    if (watchState.jobTimer) {
+      clearInterval(watchState.jobTimer);
+      watchState.jobTimer = null;
+    }
+  }
+
   async function refreshMarket() {
     if (!watchState.marketId) return;
     const btn = document.getElementById('refresh-btn');
@@ -935,6 +946,7 @@
       return;
     }
 
+    stopRefreshPoll(); // never stack poll loops (period change can fire mid-refresh)
     watchState.jobTimer = setInterval(async () => {
       try {
         const st = await api(`/api/jobs/${jobId}`);
@@ -942,8 +954,7 @@
           statusEl.textContent = `Fetching ${st.done}/${st.total}: ${st.current || '…'}`;
           return;
         }
-        clearInterval(watchState.jobTimer);
-        watchState.jobTimer = null;
+        stopRefreshPoll();
         btn.disabled = false;
         btn.textContent = '⟳ Refresh';
         if (st.state === 'error') {
@@ -953,8 +964,7 @@
           await reloadAfterRefresh();
         }
       } catch (err) {
-        clearInterval(watchState.jobTimer);
-        watchState.jobTimer = null;
+        stopRefreshPoll();
         btn.disabled = false;
         btn.textContent = '⟳ Refresh';
         statusEl.textContent = 'Progress poll failed: ' + err.message;
@@ -1001,9 +1011,15 @@
         if (m) m.lookback = lookback;
         watchState.period = lookback;
         updateMarketMeta();
-        // Refetch with the new window (the endpoint filters whatever history
-        // is stored so far; a wider window fills in on the next refresh).
+        // Show the new window immediately from whatever history is already
+        // stored, then kick off a background refresh so the wiki is re-fetched
+        // for the new lookback (the refresh job reads the just-saved lookback
+        // from the DB).  The refresh progress UI is the same as the Refresh
+        // button; when it finishes, reloadAfterRefresh() re-renders the
+        // charts with the freshly fetched data.  The server's active-refresh
+        // registry dedupes this against any manual/auto refresh in flight.
         await selectMarket(watchState.marketId);
+        await refreshMarket();
       } catch (err) {
         periodSel.value = prev;
         alert('Could not change period: ' + err.message);
