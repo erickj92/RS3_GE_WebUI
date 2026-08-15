@@ -938,8 +938,11 @@
       return;
     }
 
-    const trimmed = text.trim();
+    // Strip BOM and normalize full-width digits before parsing.
+    const textNorm = text.replace(/^\uFEFF/, '').normalize('NFKC');
+    const trimmed = textNorm.trim();
     let ids = null; // null = JSON-array parse not (successfully) used yet
+    let parseErr = null;
     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
       // Format 2: JSON-like array of item IDs. Accepts numbers, numeric
       // strings, and objects with an id/item_id/itemId field (e.g. exports
@@ -956,15 +959,21 @@
               raw = el;
             }
             if (raw === undefined || raw === null) continue;
-            const n = typeof raw === 'string'
-              ? Number(raw.replace(/[^0-9]/g, ''))
-              : Number(raw);
-            if (!Number.isInteger(n) || n <= 0) continue;
+            if (typeof raw === 'boolean') continue; // reject true/false
+            if (typeof raw === 'string') {
+              // extract first contiguous run of digits
+              const m = raw.match(/\d+/);
+              if (!m) continue;
+              raw = m[0];
+            }
+            const n = Number(raw);
+            if (!Number.isSafeInteger(n) || n <= 0) continue;
             ids.push(n);
           }
         }
       } catch (err) {
         ids = null; // JSON parse failed -> fall back to line-by-line
+        parseErr = err.message;
       }
     }
     if (!ids || !ids.length) {
@@ -974,9 +983,21 @@
       for (const line of trimmed.split(/[\r\n]+/)) {
         const lineTrimmed = line.trim();
         if (!lineTrimmed) continue;
-        const n = Number(lineTrimmed.replace(/[^0-9]/g, ''));
-        if (!Number.isInteger(n) || n <= 0) continue;
-        ids.push(n);
+        // If the line looks like it was meant to be JSON (starts with [ or {),
+        // and we already tried JSON.parse and it failed, surface that error
+        // instead of silently merging digits.
+        if (parseErr && /^[[{]/.test(lineTrimmed)) {
+          statusEl.textContent = 'Invalid JSON in file: ' + parseErr;
+          return;
+        }
+        // Extract all contiguous digit runs from the line as separate IDs.
+        const matches = lineTrimmed.match(/\d+/g);
+        if (!matches) continue;
+        for (const raw of matches) {
+          const n = Number(raw);
+          if (!Number.isSafeInteger(n) || n <= 0) continue;
+          ids.push(n);
+        }
       }
     }
     if (!ids.length) {
