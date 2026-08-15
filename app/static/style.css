@@ -95,49 +95,6 @@ select, input[type="text"], input[type="number"] {
 
 select:focus, input:focus { outline: none; border-color: var(--green); }
 
-/* ── Market dropdown (drag-and-drop reorderable) ─────────────────────── */
-
-.dropdown { position: relative; }
-
-.dropdown-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  min-width: 240px;
-  max-height: 60vh;
-  overflow-y: auto;
-  margin: 0;
-  padding: 6px;
-  list-style: none;
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
-  z-index: 50;
-}
-
-.market-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  user-select: none;
-}
-
-.market-option:hover { background: var(--hover-bg); }
-
-.market-option.active { color: var(--green); }
-
-.market-option .market-opt-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.market-option.dragging { opacity: 0.45; }
-
-.market-option.drop-above { box-shadow: 0 -2px 0 0 var(--green); }
-.market-option.drop-below { box-shadow: 0 2px 0 0 var(--green); }
-
 /* ── Drag handles ─────────────────────────────────────────────────────── */
 
 .drag-handle {
@@ -148,19 +105,29 @@ select:focus, input:focus { outline: none; border-color: var(--green); }
   font-size: 15px;
   line-height: 1;
   padding: 0 2px;
+  user-select: none;
 }
 
 .drag-handle:hover { opacity: 1; color: var(--green); }
 .drag-handle:active { cursor: grabbing; }
 
-/* ── Item card drag states ────────────────────────────────────────────── */
+/* ── Admin drag-and-drop states ──────────────────────────────────────── */
 
-.card.dragging { opacity: 0.45; }
+.market-row.dragging,
+#items-table tr.dragging { opacity: 0.45; }
 
-.card.drop-above { box-shadow: 0 -3px 0 0 var(--green), 0 2px 8px rgba(0, 0, 0, 0.35); }
-.card.drop-below { box-shadow: 0 3px 0 0 var(--green), 0 2px 8px rgba(0, 0, 0, 0.35); }
+.market-row.drop-above { box-shadow: 0 -2px 0 0 var(--green); }
+.market-row.drop-below { box-shadow: 0 2px 0 0 var(--green); }
 
-.card-head .drag-handle { font-size: 18px; order: -1; }
+/* box-shadow on <tr> doesn't render, so paint the drop line on its cells */
+#items-table tr.drop-above td { box-shadow: inset 0 2px 0 0 var(--green); }
+#items-table tr.drop-below td { box-shadow: inset 0 -2px 0 0 var(--green); }
+
+#items-table .drag-handle {
+  font-size: 14px;
+  padding: 6px 8px 6px 2px;
+  display: inline-block;
+}
 
 /* ── Market watch cards ──────────────────────────────────────────────── */
 

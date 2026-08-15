@@ -1,7 +1,8 @@
 /* rs3graph_webui — frontend logic.
    - Watch page: market selector, background refresh with progress polling,
      lazy-rendered Chart.js cards (IntersectionObserver).
-   - Admin page: market CRUD + item management with live wiki lookup.
+   - Admin page: market CRUD + item management with live wiki lookup, plus
+     drag-and-drop reordering of markets and items.
 
    Charts replicate the original matplotlib styling:
    - continuous gap-filled price lines (forward fill + back fill leading)
@@ -705,10 +706,8 @@
     const card = document.createElement('article');
     card.className = 'card';
     card.dataset.itemId = item.item_id;
-    card.draggable = true; // reordering only starts from the ⠿ handle
     card.innerHTML =
       '<header class="card-head">' +
-      '  <span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder">⠿</span>' +
       `  <img class="card-icon" src="/icons/${encodeURIComponent(item.icon_name || '')}" ` +
       '       alt="" loading="lazy" onerror="this.style.display=\'none\'">' +
       `  <h2 class="card-title">${escapeHtml(item.item_name || 'Item ' + item.item_id)}</h2>` +
@@ -721,91 +720,20 @@
       '<div class="chart-wrap price"><canvas></canvas></div>' +
       '<div class="chart-wrap volume"><canvas></canvas></div>' +
       '<div class="loading">Loading data…</div>';
-    setupCardDrag(card);
     return card;
   }
 
-  /* ── Drag-and-drop item reordering ────────────────────────────────────
-     Each card is draggable, but a drag only starts from the ⠿ handle so
-     chart interaction (hover, crosshair, tooltip) is never disturbed.
-     Dropping onto another card inserts the dragged card above/below it and
-     persists the new order via PUT /api/markets/{id}/items/reorder. */
-  let cardDragFrom = null; // item_id being dragged
-
-  function clearCardDropMarks() {
-    document.querySelectorAll('#charts .card.drop-above, #charts .card.drop-below')
-      .forEach((el) => el.classList.remove('drop-above', 'drop-below'));
-  }
-
-  function setupCardDrag(card) {
-    card.addEventListener('dragstart', (e) => {
-      if (!e.target.closest('.drag-handle')) {
-        e.preventDefault(); // only the handle starts a drag
-        return;
-      }
-      cardDragFrom = Number(card.dataset.itemId);
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(cardDragFrom));
-      card.classList.add('dragging');
-    });
-    card.addEventListener('dragend', () => {
-      card.classList.remove('dragging');
-      clearCardDropMarks();
-      cardDragFrom = null;
-    });
-    card.addEventListener('dragover', (e) => {
-      const toId = Number(card.dataset.itemId);
-      if (cardDragFrom === null || cardDragFrom === toId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      const rect = card.getBoundingClientRect();
-      const above = e.clientY < rect.top + rect.height / 2;
-      card.classList.toggle('drop-above', above);
-      card.classList.toggle('drop-below', !above);
-    });
-    card.addEventListener('dragleave', () => {
-      card.classList.remove('drop-above', 'drop-below');
-    });
-    card.addEventListener('drop', (e) => {
-      e.preventDefault();
-      const toId = Number(card.dataset.itemId);
-      if (cardDragFrom === null || cardDragFrom === toId) return;
-      const rect = card.getBoundingClientRect();
-      const above = e.clientY < rect.top + rect.height / 2;
-      card.classList.remove('drop-above', 'drop-below');
-      const fromId = cardDragFrom;
-      cardDragFrom = null; // a drop is a one-shot; reset before re-render
-      submitItemReorder(fromId, toId, above);
-    });
-  }
-
-  async function submitItemReorder(fromId, toId, above) {
-    let items;
-    try {
-      items = await api(`/api/markets/${watchState.marketId}/items`);
-    } catch (err) {
-      alert('Reorder failed: ' + err.message);
-      return;
-    }
-    const ids = items.map((it) => it.item_id);
-    const fromIdx = ids.indexOf(fromId);
-    if (fromIdx === -1) return;
-    ids.splice(fromIdx, 1);
-    let toIdx = ids.indexOf(toId);
-    if (toIdx === -1) return;
-    if (!above) toIdx += 1;
-    ids.splice(toIdx, 0, fromId);
-    try {
-      await api(`/api/markets/${watchState.marketId}/items/reorder`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_ids: ids }),
-      });
-      // Rebuild in the new order, keeping the data cache so visible charts
-      // repaint instantly without another fetch.
-      rebuildCards(await api(`/api/markets/${watchState.marketId}/items`));
-    } catch (err) {
-      alert('Reorder failed: ' + err.message);
+  /* ── Watch page market selector ──────────────────────────────────────
+     A simple native <select>; market ordering is managed on the Admin page
+     (drag-and-drop reorder lives there, not here). */
+  function populateMarketSelect() {
+    const sel = document.getElementById('market-select');
+    sel.innerHTML = '';
+    for (const m of watchState.markets) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = `${m.name} (${m.item_count})`;
+      sel.appendChild(opt);
     }
   }
 
@@ -913,9 +841,8 @@
     selectMarket(watchState.marketId).catch(() => {});
   }
 
-  /* Rebuild the visible cards in *items* order.  Used both when a market is
-     selected (fresh, after the data cache was cleared) and after an item
-     drag-and-drop reorder (cache preserved so charts repaint instantly). */
+  /* Rebuild the visible cards in *items* order.  Used when a market is
+     selected (fresh, after the data cache was cleared). */
   function rebuildCards(items) {
     const chartsEl = document.getElementById('charts');
     for (const card of chartsEl.querySelectorAll('.card')) observer.unobserve(card);
@@ -965,119 +892,16 @@
     document.getElementById('period-select').value = watchState.period;
     document.getElementById('interval-select').value =
       String((m && m.update_interval_minutes) || 0);
-    document.getElementById('market-btn').textContent = m ? m.name : 'Select market…';
+    document.getElementById('market-select').value = String(id);
     updateMarketMeta();
 
     const items = await api(`/api/markets/${id}/items`);
     rebuildCards(items);
   }
 
-  /* ── Market dropdown (drag-and-drop reorderable) ──────────────────────
-     A native <select> cannot reorder its options, so the watch page uses a
-     small custom dropdown whose entries are draggable (HTML5 DnD).  Dropping
-     an entry reorders the market list and persists the new order via
-     PUT /api/markets/reorder. */
-  let marketMenuOpen = false;
-  let marketDragFrom = null; // market id being dragged
-  let marketDragConsumed = false; // swallow the click browsers fire after a drop
-
-  function clearMarketDropMarks() {
-    document.querySelectorAll('#market-menu .drop-above, #market-menu .drop-below')
-      .forEach((el) => el.classList.remove('drop-above', 'drop-below'));
-  }
-
-  function renderMarketMenu() {
-    const menu = document.getElementById('market-menu');
-    menu.innerHTML = '';
-    for (const m of watchState.markets) {
-      const li = document.createElement('li');
-      li.className = 'market-option' + (m.id === watchState.marketId ? ' active' : '');
-      li.draggable = true;
-      li.dataset.marketId = m.id;
-      li.innerHTML =
-        '<span class="drag-handle" title="Drag to reorder">⠿</span>' +
-        `<span class="market-opt-name">${escapeHtml(m.name)}</span>` +
-        `<span class="muted small">(${m.item_count})</span>`;
-
-      li.addEventListener('click', () => {
-        if (marketDragConsumed) return;
-        toggleMarketMenu(false);
-        localStorage.setItem('rs3graph_market', String(m.id));
-        selectMarket(m.id);
-      });
-      li.addEventListener('dragstart', (e) => {
-        marketDragFrom = m.id;
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', String(m.id));
-        li.classList.add('dragging');
-      });
-      li.addEventListener('dragend', () => {
-        li.classList.remove('dragging');
-        clearMarketDropMarks();
-        marketDragFrom = null;
-        marketDragConsumed = true; // swallow the post-drop click
-        setTimeout(() => { marketDragConsumed = false; }, 60);
-      });
-      li.addEventListener('dragover', (e) => {
-        if (marketDragFrom === null || marketDragFrom === m.id) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        const rect = li.getBoundingClientRect();
-        const above = e.clientY < rect.top + rect.height / 2;
-        li.classList.toggle('drop-above', above);
-        li.classList.toggle('drop-below', !above);
-      });
-      li.addEventListener('dragleave', () => {
-        li.classList.remove('drop-above', 'drop-below');
-      });
-      li.addEventListener('drop', (e) => {
-        e.preventDefault();
-        if (marketDragFrom === null || marketDragFrom === m.id) return;
-        const rect = li.getBoundingClientRect();
-        const above = e.clientY < rect.top + rect.height / 2;
-        li.classList.remove('drop-above', 'drop-below');
-        const fromId = marketDragFrom;
-        marketDragFrom = null;
-        submitMarketReorder(fromId, m.id, above);
-      });
-      menu.appendChild(li);
-    }
-  }
-
-  function toggleMarketMenu(open) {
-    const menu = document.getElementById('market-menu');
-    marketMenuOpen = open !== undefined ? open : !marketMenuOpen;
-    menu.hidden = !marketMenuOpen;
-    if (marketMenuOpen) renderMarketMenu();
-  }
-
-  async function submitMarketReorder(fromId, toId, above) {
-    const ids = watchState.markets.map((m) => m.id);
-    const fromIdx = ids.indexOf(fromId);
-    if (fromIdx === -1) return;
-    ids.splice(fromIdx, 1);
-    let toIdx = ids.indexOf(toId);
-    if (toIdx === -1) return;
-    if (!above) toIdx += 1;
-    ids.splice(toIdx, 0, fromId);
-    try {
-      await api('/api/markets/reorder', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ market_ids: ids }),
-      });
-      // The server order is now canonical — refetch and re-render the menu.
-      watchState.markets = await api('/api/markets');
-      const m = watchState.markets.find((x) => x.id === watchState.marketId);
-      document.getElementById('market-btn').textContent = m ? m.name : 'Select market…';
-      if (marketMenuOpen) renderMarketMenu();
-    } catch (err) {
-      alert('Reorder failed: ' + err.message);
-    }
-  }
-
   async function reloadAfterRefresh() {
     watchState.markets = await api('/api/markets');
+    populateMarketSelect();
     watchState.dataCache.clear();
     await selectMarket(watchState.marketId);
   }
@@ -1130,10 +954,7 @@
 
   async function initWatch() {
     watchState.markets = await api('/api/markets');
-    const marketBtn = document.getElementById('market-btn');
-    marketBtn.textContent = watchState.markets.length
-      ? watchState.markets[0].name
-      : 'Select market…';
+    populateMarketSelect();
 
     // Restore the last-selected timezone (rs3graph_tz) from localStorage so a
     // page refresh keeps it.  The market / period / interval come from the
@@ -1145,15 +966,10 @@
       tzSel.value = savedTz;
     }
 
-    marketBtn.addEventListener('click', () => toggleMarketMenu());
-    // Close the menu on outside clicks or Escape.
-    document.addEventListener('click', (e) => {
-      if (marketMenuOpen && !e.target.closest('#market-dropdown')) {
-        toggleMarketMenu(false);
-      }
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && marketMenuOpen) toggleMarketMenu(false);
+    const sel = document.getElementById('market-select');
+    sel.addEventListener('change', () => {
+      localStorage.setItem('rs3graph_market', String(sel.value));
+      selectMarket(Number(sel.value));
     });
 
     const periodSel = document.getElementById('period-select');
@@ -1347,6 +1163,119 @@
     }
   }
 
+  /* ── Admin drag-and-drop reordering ──────────────────────────────────
+     Market rows and item rows are draggable, but a drag only starts from
+     the ⠿ handle so the row's buttons (select/rename/delete/remove) stay
+     clickable. Dropping onto another row inserts the dragged row above/
+     below it and persists the new order via PUT /api/markets/reorder or
+     PUT /api/markets/{id}/items/reorder. */
+  let adminDragFrom = null; // id (market or item) being dragged
+
+  function clearAdminDropMarks() {
+    document.querySelectorAll(
+      '#market-list .drop-above, #market-list .drop-below, ' +
+      '#items-table .drop-above, #items-table .drop-below'
+    ).forEach((el) => el.classList.remove('drop-above', 'drop-below'));
+  }
+
+  // Wire HTML5 DnD onto a row element. `payload` identifies the dragged
+  // row; `onDrop(fromId, toId, above)` persists the new order.
+  function setupAdminDrag(el, payload, onDrop) {
+    el.draggable = true;
+    el.addEventListener('dragstart', (e) => {
+      if (!e.target.closest('.drag-handle')) {
+        e.preventDefault(); // only the handle starts a drag
+        return;
+      }
+      adminDragFrom = payload;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(payload));
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      clearAdminDropMarks();
+      adminDragFrom = null;
+    });
+    el.addEventListener('dragover', (e) => {
+      if (adminDragFrom === null || adminDragFrom === payload) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = el.getBoundingClientRect();
+      const above = e.clientY < rect.top + rect.height / 2;
+      el.classList.toggle('drop-above', above);
+      el.classList.toggle('drop-below', !above);
+    });
+    el.addEventListener('dragleave', () => {
+      el.classList.remove('drop-above', 'drop-below');
+    });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (adminDragFrom === null || adminDragFrom === payload) return;
+      const rect = el.getBoundingClientRect();
+      const above = e.clientY < rect.top + rect.height / 2;
+      el.classList.remove('drop-above', 'drop-below');
+      const fromId = adminDragFrom;
+      adminDragFrom = null; // a drop is a one-shot; reset before re-render
+      onDrop(fromId, payload, above);
+    });
+  }
+
+  // Compute the new order by moving `fromId` to just before/after `toId`
+  // in `ids`, then return the reordered list.
+  function moveIdIn(ids, fromId, toId, above) {
+    const fromIdx = ids.indexOf(fromId);
+    if (fromIdx === -1) return null;
+    ids.splice(fromIdx, 1);
+    let toIdx = ids.indexOf(toId);
+    if (toIdx === -1) return null;
+    if (!above) toIdx += 1;
+    ids.splice(toIdx, 0, fromId);
+    return ids;
+  }
+
+  async function submitAdminMarketReorder(fromId, toId, above) {
+    const ids = moveIdIn(adminState.markets.map((m) => m.id), fromId, toId, above);
+    if (!ids) return;
+    try {
+      await api('/api/markets/reorder', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ market_ids: ids }),
+      });
+      // The server order is now canonical — refetch and re-render the list.
+      adminState.markets = await api('/api/markets');
+      renderMarketList();
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
+    }
+  }
+
+  async function submitAdminItemReorder(fromId, toId, above) {
+    if (!adminState.currentMarketId) return;
+    let items;
+    try {
+      items = await api(`/api/markets/${adminState.currentMarketId}/items`);
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
+      return;
+    }
+    const ids = moveIdIn(items.map((it) => it.item_id), fromId, toId, above);
+    if (!ids) return;
+    try {
+      await api(`/api/markets/${adminState.currentMarketId}/items/reorder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_ids: ids }),
+      });
+      adminState.markets = await api('/api/markets');
+      renderMarketList();
+      await reloadItemsTable();
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
+    }
+  }
+
   function mkIconBtn(label, title, onClick) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1364,6 +1293,11 @@
       const li = document.createElement('li');
       li.className = 'market-row' + (m.id === adminState.currentMarketId ? ' active' : '');
 
+      const handle = document.createElement('span');
+      handle.className = 'drag-handle';
+      handle.title = 'Drag to reorder';
+      handle.textContent = '⠿';
+
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'market-select';
@@ -1374,7 +1308,8 @@
       const del = mkIconBtn('🗑', 'Delete market', () => deleteMarket(m));
       del.classList.add('danger');
 
-      li.append(btn, ren, del);
+      li.append(handle, btn, ren, del);
+      setupAdminDrag(li, m.id, submitAdminMarketReorder);
       ul.appendChild(li);
     }
   }
@@ -1396,6 +1331,11 @@
       const tr = document.createElement('tr');
 
       const tdIcon = document.createElement('td');
+      const handle = document.createElement('span');
+      handle.className = 'drag-handle';
+      handle.title = 'Drag to reorder';
+      handle.textContent = '⠿';
+      tdIcon.appendChild(handle);
       const img = document.createElement('img');
       img.className = 'mini-icon';
       img.src = `/icons/${encodeURIComponent(it.icon_name || '')}`;
@@ -1416,6 +1356,7 @@
       tdAct.appendChild(rm);
 
       tr.append(tdIcon, tdName, tdId, tdAct);
+      setupAdminDrag(tr, it.item_id, submitAdminItemReorder);
       tbody.appendChild(tr);
     }
   }

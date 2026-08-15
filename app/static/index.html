@@ -10,11 +10,7 @@
   <header class="topbar">
     <h1 class="logo">📈 RS3 Graph</h1>
     <div class="controls">
-      <div id="market-dropdown" class="dropdown">
-        <button id="market-btn" class="btn" type="button" title="Market"
-                aria-label="Market" aria-haspopup="listbox">Select market…</button>
-        <ul id="market-menu" class="dropdown-menu" role="listbox" hidden></ul>
-      </div>
+      <select id="market-select" title="Market" aria-label="Market"></select>
       <select id="period-select" title="Time period (also sets how much the refresh job fetches)" aria-label="Time period">
         <option value="24h">24h</option>
         <option value="7d">7d</option>
