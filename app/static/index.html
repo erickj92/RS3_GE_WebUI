@@ -10,7 +10,23 @@
   <header class="topbar">
     <h1 class="logo">📈 RS3 Graph</h1>
     <div class="controls">
-      <select id="market-select" title="Market" aria-label="Market"></select>
+      <div id="market-dropdown" class="dropdown">
+        <button id="market-btn" class="btn" type="button" title="Market"
+                aria-label="Market" aria-haspopup="listbox">Select market…</button>
+        <ul id="market-menu" class="dropdown-menu" role="listbox" hidden></ul>
+      </div>
+      <select id="period-select" title="Time period (also sets how much the refresh job fetches)" aria-label="Time period">
+        <option value="24h">24h</option>
+        <option value="7d">7d</option>
+        <option value="30d">30d</option>
+      </select>
+      <select id="interval-select" title="Auto-refresh interval" aria-label="Auto-refresh interval">
+        <option value="0">Manual</option>
+        <option value="5">Every 5 min</option>
+        <option value="15">Every 15 min</option>
+        <option value="30">Every 30 min</option>
+        <option value="60">Every 60 min</option>
+      </select>
       <select id="tz-select" title="Timezone" aria-label="Timezone">
         <option value="America/New_York">EST (America/New_York)</option>
         <option value="America/Chicago">CST (America/Chicago)</option>

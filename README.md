@@ -17,8 +17,17 @@ and renders interactive, dark-themed charts in the browser.
 - Market dropdown + Refresh button (background job with live progress —
   safe for markets with hundreds of items; the API is called with a 0.5 s
   delay between requests)
+- **Time period selector (24h / 7d / 30d)** — sets both the chart view window
+  and how much history the refresh job fetches for that market (a 24h market
+  never pulls 30d of data).  Data is stored per the market's lookback and the
+  chart filters to the selected window.  Tooltips show the date next to the
+  time on 7d/30d views.
+- **Drag-and-drop reordering** — the market dropdown and the item cards have
+  ⠿ drag handles; drop to reorder, order is persisted and survives reloads.
+- **Auto-refresh interval dropdown** (Manual / 5 / 15 / 30 / 60 min) — a
+  background loop refreshes each market when its interval elapses.
 - One chart card per item: icon + name, stats bar (latest buy, latest sell,
-  total 24h volume), price chart, volume chart
+  total volume for the viewed period), price chart, volume chart
 - Continuous price lines across missing data (forward-fill then back-fill
   leading gaps — same logic as `generate_graphs.py`)
 - Data-point dots **only** at indices where real data exists
@@ -91,9 +100,12 @@ Then open <http://localhost:8000>.
 ## How it works
 
 - **Data:** `POST /api/markets/{id}/refresh` starts a background job that
-  fetches `/timeseries?lookback=24h&id={item_id}` for every item in the
-  market (0.5 s apart), replaces the stored 24h window in SQLite, and prunes
-  anything older than 24 h. Progress is polled via `GET /api/jobs/{job_id}`.
+  fetches `/timeseries?lookback={market's lookback}&id={item_id}` for every
+  item in the market (0.5 s apart), replaces the stored window in SQLite, and
+  prunes anything older than the market's configured lookback (24h / 7d /
+  30d).  Progress is polled via `GET /api/jobs/{job_id}`.  The watch page's
+  period selector updates the market's lookback; the auto-refresh loop
+  (`update_interval_minutes`) kicks off the same job on a schedule.
 - **Icons:** cached in `icons/`, downloaded from
   `https://runescape.wiki/images/{icon_name}` (spaces → underscores) on
   demand.
@@ -106,7 +118,11 @@ Then open <http://localhost:8000>.
 
 `data/rs3graph.db` (auto-created). Schema per spec: `markets`,
 `market_items`, `price_data`, plus a small `meta` table storing per-market
-"last refreshed" timestamps for the UI.
+"last refreshed" timestamps for the UI.  `markets` also carries
+`sort_order` (drag-and-drop market order), `lookback` (fetch window) and
+`update_interval_minutes` (auto-refresh cadence); `market_items` carries
+`sort_order` for card order.  Missing columns are added automatically on
+startup (SQLite ALTER TABLE migration).
 
 ### API endpoints
 
@@ -116,10 +132,13 @@ Then open <http://localhost:8000>.
 | POST | `/api/markets` | Create market `{name}` |
 | PUT | `/api/markets/{id}` | Rename market `{name}` |
 | DELETE | `/api/markets/{id}` | Delete market + orphaned price data |
+| PUT | `/api/markets/reorder` | Persist drag-and-drop market order `{market_ids}` |
+| PUT | `/api/markets/{id}/settings` | Set `{lookback}` and/or `{update_interval_minutes}` |
 | GET | `/api/markets/{id}/items` | List items in a market |
 | POST | `/api/markets/{id}/items` | Add item `{item_id}` (live wiki lookup) |
+| PUT | `/api/markets/{id}/items/reorder` | Persist drag-and-drop item order `{item_ids}` |
 | DELETE | `/api/markets/{id}/items/{iid}` | Remove item |
-| GET | `/api/markets/{id}/items/{iid}/data` | Chart-ready series + stats |
+| GET | `/api/markets/{id}/items/{iid}/data?lookback=` | Chart-ready series + stats (defaults to the market's lookback) |
 | POST | `/api/markets/{id}/refresh` | Start background refresh, returns `{job_id}` |
 | GET | `/api/jobs/{job_id}` | Refresh job status |
 | GET | `/api/lookup/{item_id}` | Name/icon lookup from `/mapping` |

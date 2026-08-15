@@ -11,6 +11,7 @@ pool and the background refresh thread can all use the same file safely.
 
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +24,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMP
+    created_at TIMESTAMP,
+    sort_order INTEGER DEFAULT 0,
+    lookback TEXT NOT NULL DEFAULT '24h',
+    update_interval_minutes INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS market_items (
@@ -79,27 +83,47 @@ def get_conn() -> sqlite3.Connection:
 
 
 def _migrate() -> None:
-    """Add the `sort_order` column if it is missing (older databases).
+    """Add columns that are missing from older databases.
 
-    Existing rows are initialized from their rowid so their current visual
-    order is preserved.  New rows get an explicit sort_order from add_item().
+    - ``market_items.sort_order``: display order inside a market (existing
+      rows initialized from their rowid so the current visual order, which
+      was previously ORDER BY item_id, is preserved).
+    - ``markets.sort_order``: display order of the market list (existing
+      rows initialized from their id, which was the previous sort key).
+    - ``markets.lookback``: how much history the refresh job fetches
+      ('24h' | '7d' | '30d').
+    - ``markets.update_interval_minutes``: auto-refresh cadence
+      (0 = manual, 5/15/30/60 = minutes).
+
+    New rows get explicit values from create_market() / add_item().
     """
-    cols = {row["name"] for row in _conn.execute("PRAGMA table_info(market_items)")}
-    if "sort_order" in cols:
-        return
-    _conn.execute("ALTER TABLE market_items ADD COLUMN sort_order INTEGER DEFAULT 0")
-    # Preserve the pre-migration visual order (previously ORDER BY item_id).
-    _conn.execute(
-        """
-        UPDATE market_items
-        SET sort_order = (
-            SELECT COUNT(*) FROM market_items AS mi2
-            WHERE mi2.market_id = market_items.market_id
-              AND (mi2.sort_order, mi2.rowid)
-                  <= (market_items.sort_order, market_items.rowid)
+    item_cols = {row["name"] for row in _conn.execute("PRAGMA table_info(market_items)")}
+    if "sort_order" not in item_cols:
+        _conn.execute("ALTER TABLE market_items ADD COLUMN sort_order INTEGER DEFAULT 0")
+        # Preserve the pre-migration visual order (previously ORDER BY item_id).
+        _conn.execute(
+            """
+            UPDATE market_items
+            SET sort_order = (
+                SELECT COUNT(*) FROM market_items AS mi2
+                WHERE mi2.market_id = market_items.market_id
+                  AND (mi2.sort_order, mi2.rowid)
+                      <= (market_items.sort_order, market_items.rowid)
+            )
+            """
         )
-        """
-    )
+
+    mkt_cols = {row["name"] for row in _conn.execute("PRAGMA table_info(markets)")}
+    if "sort_order" not in mkt_cols:
+        _conn.execute("ALTER TABLE markets ADD COLUMN sort_order INTEGER DEFAULT 0")
+        # Preserve the pre-migration order (previously ORDER BY id).
+        _conn.execute("UPDATE markets SET sort_order = id WHERE sort_order = 0")
+    if "lookback" not in mkt_cols:
+        _conn.execute("ALTER TABLE markets ADD COLUMN lookback TEXT NOT NULL DEFAULT '24h'")
+    if "update_interval_minutes" not in mkt_cols:
+        _conn.execute(
+            "ALTER TABLE markets ADD COLUMN update_interval_minutes INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +133,9 @@ def _migrate() -> None:
 def list_markets() -> list[dict]:
     conn = get_conn()
     with _lock:
-        rows = conn.execute("SELECT * FROM markets ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM markets ORDER BY sort_order ASC, id ASC"
+        ).fetchall()
         out = []
         for r in rows:
             cnt = conn.execute(
@@ -120,10 +146,63 @@ def list_markets() -> list[dict]:
                 "id": r["id"],
                 "name": r["name"],
                 "created_at": r["created_at"],
+                "sort_order": r["sort_order"],
+                "lookback": r["lookback"],
+                "update_interval_minutes": r["update_interval_minutes"],
                 "item_count": cnt,
                 "last_refresh": get_meta(f"market:{r['id']}:last_refresh"),
             })
         return out
+
+
+def reorder_markets(ordered_ids: list[int]) -> None:
+    """Apply a new display order to the market list.
+
+    *ordered_ids* is the full desired ordering.  Any market not listed is
+    pushed after the listed ones, preserving its relative id order, so an
+    incomplete payload can never silently reorder (or hide) other markets.
+    """
+    conn = get_conn()
+    with _lock:
+        for idx, market_id in enumerate(ordered_ids):
+            conn.execute(
+                "UPDATE markets SET sort_order=? WHERE id=?", (idx, market_id)
+            )
+        conn.execute(
+            "UPDATE markets SET sort_order = ? + id "
+            "WHERE id NOT IN ({})".format(
+                ",".join("?" for _ in ordered_ids) or "NULL"
+            ),
+            (len(ordered_ids), *ordered_ids),
+        )
+        conn.commit()
+
+
+def update_market_settings(
+    market_id: int,
+    lookback: str | None = None,
+    update_interval_minutes: int | None = None,
+) -> None:
+    """Update per-market fetch/view settings; None leaves a field untouched."""
+    conn = get_conn()
+    sets = []
+    params: list = []
+    if lookback is not None:
+        sets.append("lookback=?")
+        params.append(lookback)
+    if update_interval_minutes is not None:
+        sets.append("update_interval_minutes=?")
+        params.append(update_interval_minutes)
+    if not sets:
+        return
+    params.append(market_id)
+    with _lock:
+        cur = conn.execute(
+            f"UPDATE markets SET {', '.join(sets)} WHERE id=?", params
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            raise KeyError("market not found")
 
 
 def get_market(market_id: int) -> dict | None:
@@ -139,9 +218,12 @@ def create_market(name: str) -> int:
     conn = get_conn()
     with _lock:
         try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM markets"
+            ).fetchone()
             cur = conn.execute(
-                "INSERT INTO markets (name, created_at) VALUES (?, ?)",
-                (name, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO markets (name, created_at, sort_order) VALUES (?, ?, ?)",
+                (name, datetime.now(timezone.utc).isoformat(), row["next"]),
             )
             conn.commit()
             return cur.lastrowid
@@ -245,6 +327,31 @@ def remove_item(market_id: int, item_id: int) -> None:
         ).fetchone()["c"]
         if cnt == 0:
             conn.execute("DELETE FROM price_data WHERE item_id=?", (item_id,))
+        conn.commit()
+
+
+def reorder_items(market_id: int, ordered_ids: list[int]) -> None:
+    """Apply a new display order to the items inside *market_id*.
+
+    Any item of this market not listed keeps a slot after the listed ones
+    (in id order), so partial payloads cannot silently reorder or hide items.
+    Items of other markets are never touched.
+    """
+    conn = get_conn()
+    with _lock:
+        for idx, item_id in enumerate(ordered_ids):
+            conn.execute(
+                "UPDATE market_items SET sort_order=? "
+                "WHERE market_id=? AND item_id=?",
+                (idx, market_id, item_id),
+            )
+        conn.execute(
+            "UPDATE market_items SET sort_order = ? + id "
+            "WHERE market_id=? AND item_id NOT IN ({})".format(
+                ",".join("?" for _ in ordered_ids) or "NULL"
+            ),
+            (len(ordered_ids), market_id, *ordered_ids),
+        )
         conn.commit()
 
 
@@ -370,8 +477,14 @@ def interp_gaps(series: list, timestamps: list | None = None) -> list:
     return out
 
 
-def get_series(item_id: int) -> dict:
+def get_series(item_id: int, lookback_hours: int | None = None) -> dict:
     """Return chart-ready parallel arrays for *item_id*.
+
+    When *lookback_hours* is given, only data points within the last
+    ``lookback_hours`` (relative to the wall clock) are returned; None
+    returns everything stored.  The refresh job stores exactly the market's
+    configured window, so the filter mainly serves the 24h/7d/30d view
+    selector (and keeps charts stable while a wider window is still filling).
 
     - timestamps: epoch ms (EST rendering happens client-side)
     - highPrice / lowPrice: gap-filled for continuous lines; gaps between
@@ -387,12 +500,22 @@ def get_series(item_id: int) -> dict:
       is null, and that real 0 must be displayed, not gap-filled.
     """
     conn = get_conn()
+    cutoff: int | None = None
+    if lookback_hours:
+        cutoff = int(time.time()) - lookback_hours * 3600
     with _lock:
-        rows = conn.execute(
-            "SELECT timestamp, avg_high_price, avg_low_price, high_volume, low_volume "
-            "FROM price_data WHERE item_id=? ORDER BY timestamp",
-            (item_id,),
-        ).fetchall()
+        if cutoff is None:
+            rows = conn.execute(
+                "SELECT timestamp, avg_high_price, avg_low_price, high_volume, low_volume "
+                "FROM price_data WHERE item_id=? ORDER BY timestamp",
+                (item_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT timestamp, avg_high_price, avg_low_price, high_volume, low_volume "
+                "FROM price_data WHERE item_id=? AND timestamp >= ? ORDER BY timestamp",
+                (item_id, cutoff),
+            ).fetchall()
 
     timestamps: list[int] = []
     high: list = []
@@ -435,25 +558,50 @@ def get_series(item_id: int) -> dict:
     }
 
 
-def stats_for(item_id: int) -> dict:
-    """Latest buy/sell price + total 24h volume for *item_id*."""
+def stats_for(item_id: int, lookback_hours: int | None = None) -> dict:
+    """Latest buy/sell price + total volume for *item_id*.
+
+    The latest prices are the latest regardless of window; the volume sum
+    (and point count) is restricted to *lookback_hours* when given so the
+    "Vol" stat matches the currently viewed period.
+    """
     conn = get_conn()
+    cutoff: int | None = None
+    if lookback_hours:
+        cutoff = int(time.time()) - lookback_hours * 3600
     with _lock:
-        row = conn.execute(
-            """
-            SELECT
-              (SELECT avg_high_price FROM price_data
-                WHERE item_id=? AND avg_high_price IS NOT NULL
-                ORDER BY timestamp DESC LIMIT 1) AS latest_buy,
-              (SELECT avg_low_price FROM price_data
-                WHERE item_id=? AND avg_low_price IS NOT NULL
-                ORDER BY timestamp DESC LIMIT 1) AS latest_sell,
-              (SELECT COALESCE(SUM(COALESCE(high_volume,0) + COALESCE(low_volume,0)), 0)
-                FROM price_data WHERE item_id=?) AS total_volume,
-              (SELECT COUNT(*) FROM price_data WHERE item_id=?) AS points
-            """,
-            (item_id, item_id, item_id, item_id),
-        ).fetchone()
+        if cutoff is None:
+            row = conn.execute(
+                """
+                SELECT
+                  (SELECT avg_high_price FROM price_data
+                    WHERE item_id=? AND avg_high_price IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 1) AS latest_buy,
+                  (SELECT avg_low_price FROM price_data
+                    WHERE item_id=? AND avg_low_price IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 1) AS latest_sell,
+                  (SELECT COALESCE(SUM(COALESCE(high_volume,0) + COALESCE(low_volume,0)), 0)
+                    FROM price_data WHERE item_id=?) AS total_volume,
+                  (SELECT COUNT(*) FROM price_data WHERE item_id=?) AS points
+                """,
+                (item_id, item_id, item_id, item_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT
+                  (SELECT avg_high_price FROM price_data
+                    WHERE item_id=? AND avg_high_price IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 1) AS latest_buy,
+                  (SELECT avg_low_price FROM price_data
+                    WHERE item_id=? AND avg_low_price IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 1) AS latest_sell,
+                  (SELECT COALESCE(SUM(COALESCE(high_volume,0) + COALESCE(low_volume,0)), 0)
+                    FROM price_data WHERE item_id=? AND timestamp >= ?) AS total_volume,
+                  (SELECT COUNT(*) FROM price_data WHERE item_id=? AND timestamp >= ?) AS points
+                """,
+                (item_id, item_id, item_id, cutoff, item_id, cutoff),
+            ).fetchone()
     return {
         "latest_buy": row["latest_buy"],
         "latest_sell": row["latest_sell"],

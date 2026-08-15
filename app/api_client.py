@@ -25,6 +25,18 @@ USER_AGENT = os.environ.get(
 )
 LOOKBACK = "24h"
 
+# Valid lookback values for /timeseries (verified against the live API
+# 2026-08-15: 6h/24h/7d/30d/6m/1y are accepted; the hour-based aliases
+# 168h/720h are NOT).  Maps each to hours for DB window filtering.
+LOOKBACK_HOURS = {
+    "6h": 6,
+    "24h": 24,
+    "7d": 168,
+    "30d": 720,
+    "6m": 4320,
+    "1y": 8760,
+}
+
 # The timeseries endpoint takes ONE id per request (repeated id= params are
 # rejected with 400), so refreshes fetch items concurrently instead.  This is
 # the number of simultaneous requests we keep in flight; well within the
@@ -63,23 +75,30 @@ def fetch_mapping(force: bool = False) -> dict:
         return _mapping
 
 
-def fetch_timeseries(item_id: int) -> list[dict]:
-    """Fetch 24h timeseries entries for *item_id* (list of raw API records)."""
+def fetch_timeseries(item_id: int, lookback: str = LOOKBACK) -> list[dict]:
+    """Fetch timeseries entries for *item_id* over *lookback*.
+
+    *lookback* is one of the API's valid values ('24h', '7d', '30d', …);
+    returns the list of raw API records.
+    """
     url = f"{API_BASE}/timeseries"
-    params = {"lookback": LOOKBACK, "id": str(item_id)}
+    params = {"lookback": lookback, "id": str(item_id)}
     resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=30)
     resp.raise_for_status()
     return resp.json().get("data", [])
 
 
 def fetch_timeseries_many(
-    item_ids: list[int], max_workers: int = FETCH_CONCURRENCY
+    item_ids: list[int],
+    lookback: str = LOOKBACK,
+    max_workers: int = FETCH_CONCURRENCY,
 ) -> tuple[dict[int, list[dict]], dict[int, Exception]]:
     """Fetch timeseries for many item IDs concurrently.
 
     The RS Wiki prices API does NOT support batching multiple ids in one
     timeseries request, so we parallelize individual requests with a
     ThreadPoolExecutor capped at *max_workers* (default 10) to stay polite.
+    *lookback* is passed through to every request.
 
     Returns ``(results, failures)`` where results maps item_id -> raw API
     records and failures maps item_id -> the exception raised for that item.
@@ -89,7 +108,7 @@ def fetch_timeseries_many(
     results: dict[int, list[dict]] = {}
     failures: dict[int, Exception] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(fetch_timeseries, iid): iid for iid in item_ids}
+        futures = {pool.submit(fetch_timeseries, iid, lookback): iid for iid in item_ids}
         for future in as_completed(futures):
             iid = futures[future]
             try:

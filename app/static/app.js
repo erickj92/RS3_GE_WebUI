@@ -216,6 +216,34 @@
     return getHourFormatter(currentTz).format(new Date(ms));
   }
 
+  // Tooltip title: HH:MM for the 24h view; date + time (M/D/YYYY HH:MM) for
+  // 7d/30d, where a bare time would be ambiguous across days.
+  function tooltipTime(ms, period) {
+    const opts = { timeZone: currentTz, hour12: false, hour: '2-digit', minute: '2-digit' };
+    if (period === '7d' || period === '30d') {
+      opts.month = 'numeric';
+      opts.day = 'numeric';
+      opts.year = 'numeric';
+    }
+    return new Intl.DateTimeFormat('en-US', opts).format(new Date(ms));
+  }
+
+  // Axis tick label: hour-only for 24h; "M/D HH" for 7d/30d.  Ticks land on
+  // exact hours (getXScale snaps min/max and uses whole-hour steps), so the
+  // hour stays precise while the date disambiguates which day.
+  function axisTickTime(ms, period) {
+    if (period === '7d' || period === '30d') {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone: currentTz,
+        hour12: false,
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+      }).format(new Date(ms));
+    }
+    return estTimeHour(ms);
+  }
+
   // Get the timezone abbreviation for display ("EST", "CST", "UTC", …).
   function getTzAbbr(tz) {
     const now = new Date();
@@ -389,7 +417,7 @@
       tooltipEl.innerHTML =
         '<div style="color:#1a1a1a;font-size:14px;font-weight:600;margin-bottom:6px;' +
         'padding-bottom:6px;border-bottom:1px solid rgba(0,0,0,0.1)">' +
-        escapeHtml(estTime(S.timestamps[i])) + '</div>' +
+        escapeHtml(tooltipTime(S.timestamps[i], chart.$period)) + '</div>' +
         tooltipRow('Buy Price', actualValue(S, S.highReal, S.highPrice, i), ' GP', COLORS.green) +
         tooltipRow('Sell Price', actualValue(S, S.lowReal, S.lowPrice, i), ' GP', COLORS.orange) +
         tooltipRow('Buy Vol', actualValue(S, S.highVolReal, S.highVolume, i), '', COLORS.green) +
@@ -402,21 +430,33 @@
 
   /* Shared x-axis config for both price and volume charts.
      - min snaps to the start of the hour before the first data point
-     - max = 1.5% padding beyond the last data point, rounded up to the
-       next full hour (hour-snapped so stepSize yields exact-hour ticks)
-     - ticks are generated at exact 1-hour intervals within the range
+     - max = 1.5% padding beyond the last data point, rounded UP to a whole
+       number of steps
+     - 24h view: 1h ticks; 7d/30d: largest whole-hour "nice" step giving
+       ~14 ticks (12h for 7d, 48h for 30d), labelled with date+hour
      - Both charts use IDENTICAL min/max so their time axes line up */
-  function getXScale(S) {
+  function getXScale(S, period) {
     const firstTs = S.timestamps[0];
     const lastTs = S.timestamps[S.timestamps.length - 1];
     const span = lastTs - firstTs;
     const min = Math.floor(firstTs / 3600000) * 3600000; // snap to hour start
-    // 1.5% right padding, rounded UP to the next full hour. Chart.js v4 only
-    // honors stepSize when (max - min) is an exact multiple of it (see
+
+    let stepMs = 3600000; // 1 hour in ms
+    if (span > 36 * 3600000) { // multi-day view (7d / 30d)
+      const spanH = (lastTs - min) / 3600000;
+      const target = spanH / 14; // aim for ~14 ticks across the span
+      const niceStepsH = [168, 84, 48, 24, 12, 6, 4, 2, 1];
+      const stepH = niceStepsH.find((h) => h <= target) ?? 1;
+      stepMs = stepH * 3600000;
+    }
+
+    // 1.5% right padding, rounded UP to the next whole step. Chart.js v4
+    // only honors stepSize when (max - min) is an exact multiple of it (see
     // generateTicks: almostWhole((max-min)/step, spacing/1000)); otherwise it
     // redistributes evenly and ticks land at odd times (21:28, 2:40, …).
-    // Because min is hour-snapped, an hour-snapped max guarantees hourly ticks.
-    const max = Math.ceil((lastTs + span * 0.015) / 3600000) * 3600000;
+    // Because min is hour-snapped and stepMs is a whole number of hours, the
+    // rounded max guarantees ticks at exact hours (and dates for 7d/30d).
+    const max = min + Math.ceil((lastTs + span * 0.015 - min) / stepMs) * stepMs;
 
     return {
       type: 'linear',
@@ -428,12 +468,12 @@
       offset: false,
       ticks: {
         color: COLORS.text,
-        callback: (v) => estTimeHour(v),
+        callback: (v) => axisTickTime(v, period),
         font: { size: 13 },
         maxRotation: 0,
         autoSkip: true,
         maxTicksLimit: 30, // high enough that hourly ticks are never skipped
-        stepSize: 3600000, // 1 hour in ms → ticks land on exact hours
+        stepSize: stepMs,
       },
       grid: { color: COLORS.grid },
       border: { color: COLORS.text },
@@ -485,6 +525,7 @@
 
   function buildPriceChart(canvas, data) {
     const S = data.series;
+    const period = data.period || watchState.period || '24h';
 
     const buyLine = {
       label: 'Buy Price',
@@ -534,7 +575,7 @@
         maintainAspectRatio: false,
         animation: false,
         interaction: indexInteraction,
-        scales: { x: getXScale(S), y: { ...yScale } },
+        scales: { x: getXScale(S, period), y: { ...yScale } },
         plugins: {
           crosshair: {},
           legend: legendOpts('line'),
@@ -548,6 +589,7 @@
       },
     });
     chart.$series = S;
+    chart.$period = period;
     return chart;
   }
 
@@ -555,6 +597,7 @@
 
   function buildVolumeChart(canvas, data) {
     const S = data.series;
+    const period = data.period || watchState.period || '24h';
 
     // Bar width is VISUAL ONLY: fixed 4px thickness (appears ~6px with
     // aliasing) so each 5-minute bar is exactly 4px wide. With 288 data
@@ -604,7 +647,7 @@
         // single column.
         grouped: false,
         scales: {
-          x: getXScale(S),
+          x: getXScale(S, period),
           // Sell bars are stored as negative values (to render below the
           // zero line) but the y-axis must show positive magnitudes, so
           // tick labels use the absolute value.
@@ -629,6 +672,7 @@
       },
     });
     chart.$series = S;
+    chart.$period = period;
     return chart;
   }
 
@@ -661,8 +705,10 @@
     const card = document.createElement('article');
     card.className = 'card';
     card.dataset.itemId = item.item_id;
+    card.draggable = true; // reordering only starts from the ⠿ handle
     card.innerHTML =
       '<header class="card-head">' +
+      '  <span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder">⠿</span>' +
       `  <img class="card-icon" src="/icons/${encodeURIComponent(item.icon_name || '')}" ` +
       '       alt="" loading="lazy" onerror="this.style.display=\'none\'">' +
       `  <h2 class="card-title">${escapeHtml(item.item_name || 'Item ' + item.item_id)}</h2>` +
@@ -675,7 +721,92 @@
       '<div class="chart-wrap price"><canvas></canvas></div>' +
       '<div class="chart-wrap volume"><canvas></canvas></div>' +
       '<div class="loading">Loading data…</div>';
+    setupCardDrag(card);
     return card;
+  }
+
+  /* ── Drag-and-drop item reordering ────────────────────────────────────
+     Each card is draggable, but a drag only starts from the ⠿ handle so
+     chart interaction (hover, crosshair, tooltip) is never disturbed.
+     Dropping onto another card inserts the dragged card above/below it and
+     persists the new order via PUT /api/markets/{id}/items/reorder. */
+  let cardDragFrom = null; // item_id being dragged
+
+  function clearCardDropMarks() {
+    document.querySelectorAll('#charts .card.drop-above, #charts .card.drop-below')
+      .forEach((el) => el.classList.remove('drop-above', 'drop-below'));
+  }
+
+  function setupCardDrag(card) {
+    card.addEventListener('dragstart', (e) => {
+      if (!e.target.closest('.drag-handle')) {
+        e.preventDefault(); // only the handle starts a drag
+        return;
+      }
+      cardDragFrom = Number(card.dataset.itemId);
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(cardDragFrom));
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      clearCardDropMarks();
+      cardDragFrom = null;
+    });
+    card.addEventListener('dragover', (e) => {
+      const toId = Number(card.dataset.itemId);
+      if (cardDragFrom === null || cardDragFrom === toId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = card.getBoundingClientRect();
+      const above = e.clientY < rect.top + rect.height / 2;
+      card.classList.toggle('drop-above', above);
+      card.classList.toggle('drop-below', !above);
+    });
+    card.addEventListener('dragleave', () => {
+      card.classList.remove('drop-above', 'drop-below');
+    });
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const toId = Number(card.dataset.itemId);
+      if (cardDragFrom === null || cardDragFrom === toId) return;
+      const rect = card.getBoundingClientRect();
+      const above = e.clientY < rect.top + rect.height / 2;
+      card.classList.remove('drop-above', 'drop-below');
+      const fromId = cardDragFrom;
+      cardDragFrom = null; // a drop is a one-shot; reset before re-render
+      submitItemReorder(fromId, toId, above);
+    });
+  }
+
+  async function submitItemReorder(fromId, toId, above) {
+    let items;
+    try {
+      items = await api(`/api/markets/${watchState.marketId}/items`);
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
+      return;
+    }
+    const ids = items.map((it) => it.item_id);
+    const fromIdx = ids.indexOf(fromId);
+    if (fromIdx === -1) return;
+    ids.splice(fromIdx, 1);
+    let toIdx = ids.indexOf(toId);
+    if (toIdx === -1) return;
+    if (!above) toIdx += 1;
+    ids.splice(toIdx, 0, fromId);
+    try {
+      await api(`/api/markets/${watchState.marketId}/items/reorder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_ids: ids }),
+      });
+      // Rebuild in the new order, keeping the data cache so visible charts
+      // repaint instantly without another fetch.
+      rebuildCards(await api(`/api/markets/${watchState.marketId}/items`));
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
+    }
   }
 
   async function renderCard(card) {
@@ -688,7 +819,10 @@
     card.dataset.loading = '1';
     const loading = card.querySelector('.loading');
     try {
-      const payload = await api(`/api/markets/${watchState.marketId}/items/${itemId}/data`);
+      const payload = await api(
+        `/api/markets/${watchState.marketId}/items/${itemId}/data` +
+        `?lookback=${encodeURIComponent(watchState.period)}`
+      );
       watchState.dataCache.set(itemId, payload);
       paintCard(card, payload);
     } catch (err) {
@@ -720,6 +854,9 @@
     card.querySelector('[data-stat="buy"]').textContent = fmtNum(data.stats.latest_buy);
     card.querySelector('[data-stat="sell"]').textContent = fmtNum(data.stats.latest_sell);
     card.querySelector('[data-stat="vol"]').textContent = fmtNum(data.stats.total_volume);
+    // Label the volume stat with the viewed window (24h / 7d / 30d).
+    const period = data.period || watchState.period || '24h';
+    card.querySelector('.stat.vol .lbl').textContent = `Vol (${period})`;
 
     const priceCanvas = card.querySelector('.chart-wrap.price canvas');
     const volCanvas = card.querySelector('.chart-wrap.volume canvas');
@@ -776,26 +913,14 @@
     selectMarket(watchState.marketId).catch(() => {});
   }
 
-  async function selectMarket(id) {
-    watchState.marketId = id;
-    watchState.dataCache.clear();
-    destroyAllCharts();
-
+  /* Rebuild the visible cards in *items* order.  Used both when a market is
+     selected (fresh, after the data cache was cleared) and after an item
+     drag-and-drop reorder (cache preserved so charts repaint instantly). */
+  function rebuildCards(items) {
     const chartsEl = document.getElementById('charts');
+    for (const card of chartsEl.querySelectorAll('.card')) observer.unobserve(card);
+    destroyAllCharts();
     chartsEl.innerHTML = '';
-    document.getElementById('refresh-status').textContent = '';
-    const btn = document.getElementById('refresh-btn');
-    btn.disabled = false;
-    btn.textContent = '⟳ Refresh';
-
-    const m = watchState.markets.find((x) => x.id === id);
-    const metaEl = document.getElementById('market-meta');
-    metaEl.textContent = m
-      ? `${m.item_count} item${m.item_count === 1 ? '' : 's'} · last refreshed: ` +
-        (m.last_refresh ? new Date(m.last_refresh).toLocaleString() : 'never')
-      : '';
-
-    const items = await api(`/api/markets/${id}/items`);
     if (!items.length) {
       showEmpty('No items in this market. <a href="/admin">Add items in the Admin panel</a>.');
       return;
@@ -804,6 +929,150 @@
       const card = makeCard(item);
       chartsEl.appendChild(card);
       observer.observe(card);
+    }
+  }
+
+  function updateMarketMeta() {
+    const m = watchState.markets.find((x) => x.id === watchState.marketId);
+    const metaEl = document.getElementById('market-meta');
+    if (!m) {
+      metaEl.textContent = '';
+      return;
+    }
+    const parts = [
+      `${m.item_count} item${m.item_count === 1 ? '' : 's'}`,
+      `lookback ${m.lookback || '24h'}`,
+      (m.update_interval_minutes || 0) > 0
+        ? `auto-refresh every ${m.update_interval_minutes} min`
+        : 'manual refresh',
+      'last refreshed: ' + (m.last_refresh ? new Date(m.last_refresh).toLocaleString() : 'never'),
+    ];
+    metaEl.textContent = parts.join(' · ');
+  }
+
+  async function selectMarket(id) {
+    watchState.marketId = id;
+    watchState.dataCache.clear();
+    destroyAllCharts();
+    document.getElementById('charts').innerHTML = '';
+    document.getElementById('refresh-status').textContent = '';
+    const btn = document.getElementById('refresh-btn');
+    btn.disabled = false;
+    btn.textContent = '⟳ Refresh';
+
+    const m = watchState.markets.find((x) => x.id === id);
+    watchState.period = (m && m.lookback) || '24h';
+    document.getElementById('period-select').value = watchState.period;
+    document.getElementById('interval-select').value =
+      String((m && m.update_interval_minutes) || 0);
+    document.getElementById('market-btn').textContent = m ? m.name : 'Select market…';
+    updateMarketMeta();
+
+    const items = await api(`/api/markets/${id}/items`);
+    rebuildCards(items);
+  }
+
+  /* ── Market dropdown (drag-and-drop reorderable) ──────────────────────
+     A native <select> cannot reorder its options, so the watch page uses a
+     small custom dropdown whose entries are draggable (HTML5 DnD).  Dropping
+     an entry reorders the market list and persists the new order via
+     PUT /api/markets/reorder. */
+  let marketMenuOpen = false;
+  let marketDragFrom = null; // market id being dragged
+  let marketDragConsumed = false; // swallow the click browsers fire after a drop
+
+  function clearMarketDropMarks() {
+    document.querySelectorAll('#market-menu .drop-above, #market-menu .drop-below')
+      .forEach((el) => el.classList.remove('drop-above', 'drop-below'));
+  }
+
+  function renderMarketMenu() {
+    const menu = document.getElementById('market-menu');
+    menu.innerHTML = '';
+    for (const m of watchState.markets) {
+      const li = document.createElement('li');
+      li.className = 'market-option' + (m.id === watchState.marketId ? ' active' : '');
+      li.draggable = true;
+      li.dataset.marketId = m.id;
+      li.innerHTML =
+        '<span class="drag-handle" title="Drag to reorder">⠿</span>' +
+        `<span class="market-opt-name">${escapeHtml(m.name)}</span>` +
+        `<span class="muted small">(${m.item_count})</span>`;
+
+      li.addEventListener('click', () => {
+        if (marketDragConsumed) return;
+        toggleMarketMenu(false);
+        localStorage.setItem('rs3graph_market', String(m.id));
+        selectMarket(m.id);
+      });
+      li.addEventListener('dragstart', (e) => {
+        marketDragFrom = m.id;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(m.id));
+        li.classList.add('dragging');
+      });
+      li.addEventListener('dragend', () => {
+        li.classList.remove('dragging');
+        clearMarketDropMarks();
+        marketDragFrom = null;
+        marketDragConsumed = true; // swallow the post-drop click
+        setTimeout(() => { marketDragConsumed = false; }, 60);
+      });
+      li.addEventListener('dragover', (e) => {
+        if (marketDragFrom === null || marketDragFrom === m.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const rect = li.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        li.classList.toggle('drop-above', above);
+        li.classList.toggle('drop-below', !above);
+      });
+      li.addEventListener('dragleave', () => {
+        li.classList.remove('drop-above', 'drop-below');
+      });
+      li.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (marketDragFrom === null || marketDragFrom === m.id) return;
+        const rect = li.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        li.classList.remove('drop-above', 'drop-below');
+        const fromId = marketDragFrom;
+        marketDragFrom = null;
+        submitMarketReorder(fromId, m.id, above);
+      });
+      menu.appendChild(li);
+    }
+  }
+
+  function toggleMarketMenu(open) {
+    const menu = document.getElementById('market-menu');
+    marketMenuOpen = open !== undefined ? open : !marketMenuOpen;
+    menu.hidden = !marketMenuOpen;
+    if (marketMenuOpen) renderMarketMenu();
+  }
+
+  async function submitMarketReorder(fromId, toId, above) {
+    const ids = watchState.markets.map((m) => m.id);
+    const fromIdx = ids.indexOf(fromId);
+    if (fromIdx === -1) return;
+    ids.splice(fromIdx, 1);
+    let toIdx = ids.indexOf(toId);
+    if (toIdx === -1) return;
+    if (!above) toIdx += 1;
+    ids.splice(toIdx, 0, fromId);
+    try {
+      await api('/api/markets/reorder', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ market_ids: ids }),
+      });
+      // The server order is now canonical — refetch and re-render the menu.
+      watchState.markets = await api('/api/markets');
+      const m = watchState.markets.find((x) => x.id === watchState.marketId);
+      document.getElementById('market-btn').textContent = m ? m.name : 'Select market…';
+      if (marketMenuOpen) renderMarketMenu();
+    } catch (err) {
+      alert('Reorder failed: ' + err.message);
     }
   }
 
@@ -861,17 +1130,14 @@
 
   async function initWatch() {
     watchState.markets = await api('/api/markets');
-    const sel = document.getElementById('market-select');
-    sel.innerHTML = '';
-    for (const m of watchState.markets) {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = `${m.name} (${m.item_count})`;
-      sel.appendChild(opt);
-    }
+    const marketBtn = document.getElementById('market-btn');
+    marketBtn.textContent = watchState.markets.length
+      ? watchState.markets[0].name
+      : 'Select market…';
 
-    // Restore the last-selected timezone (rs3graph_tz) and market
-    // (rs3graph_market) from localStorage so a page refresh keeps them.
+    // Restore the last-selected timezone (rs3graph_tz) from localStorage so a
+    // page refresh keeps it.  The market / period / interval come from the
+    // server (per-market settings) via selectMarket().
     const tzSel = document.getElementById('tz-select');
     const savedTz = localStorage.getItem('rs3graph_tz');
     if (savedTz && [...tzSel.options].some((o) => o.value === savedTz)) {
@@ -879,10 +1145,67 @@
       tzSel.value = savedTz;
     }
 
-    sel.addEventListener('change', () => {
-      localStorage.setItem('rs3graph_market', String(sel.value));
-      selectMarket(Number(sel.value));
+    marketBtn.addEventListener('click', () => toggleMarketMenu());
+    // Close the menu on outside clicks or Escape.
+    document.addEventListener('click', (e) => {
+      if (marketMenuOpen && !e.target.closest('#market-dropdown')) {
+        toggleMarketMenu(false);
+      }
     });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && marketMenuOpen) toggleMarketMenu(false);
+    });
+
+    const periodSel = document.getElementById('period-select');
+    const intervalSel = document.getElementById('interval-select');
+
+    // The period selector both filters the view AND sets the market's fetch
+    // lookback (the refresh job fetches exactly this window next time).
+    periodSel.addEventListener('change', async (e) => {
+      if (!watchState.marketId) return;
+      const lookback = e.target.value;
+      const prev = watchState.period;
+      try {
+        await api(`/api/markets/${watchState.marketId}/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lookback }),
+        });
+        const m = watchState.markets.find((x) => x.id === watchState.marketId);
+        if (m) m.lookback = lookback;
+        watchState.period = lookback;
+        updateMarketMeta();
+        // Refetch with the new window (the endpoint filters whatever history
+        // is stored so far; a wider window fills in on the next refresh).
+        await selectMarket(watchState.marketId);
+      } catch (err) {
+        periodSel.value = prev;
+        alert('Could not change period: ' + err.message);
+      }
+    });
+
+    intervalSel.addEventListener('change', async (e) => {
+      if (!watchState.marketId) return;
+      const minutes = Number(e.target.value);
+      const prev = String(
+        (watchState.markets.find((x) => x.id === watchState.marketId)
+          || {}).update_interval_minutes || 0
+      );
+      try {
+        await api(`/api/markets/${watchState.marketId}/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ update_interval_minutes: minutes }),
+        });
+        const m = watchState.markets.find((x) => x.id === watchState.marketId);
+        if (m) m.update_interval_minutes = minutes;
+        updateMarketMeta();
+      } catch (err) {
+        intervalSel.value = prev;
+        alert('Could not change interval: ' + err.message);
+      }
+    });
+
     tzSel.addEventListener('change', (e) => {
       currentTz = e.target.value;
       localStorage.setItem('rs3graph_tz', currentTz);
@@ -896,7 +1219,6 @@
       const savedMarket = localStorage.getItem('rs3graph_market');
       const target = watchState.markets.find((m) => String(m.id) === savedMarket)
         || watchState.markets[0];
-      sel.value = target.id;
       await selectMarket(target.id);
     } else {
       showEmpty('No markets yet. <a href="/admin">Create one in the Admin panel</a>.');
