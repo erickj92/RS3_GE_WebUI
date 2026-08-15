@@ -857,6 +857,16 @@
       chartsEl.appendChild(card);
       observer.observe(card);
     }
+    // Immediately render any cards already in the viewport so the user
+    // sees graphs right away instead of waiting for IntersectionObserver.
+    requestAnimationFrame(() => {
+      for (const card of chartsEl.querySelectorAll('.card')) {
+        const rect = card.getBoundingClientRect();
+        if (rect.top < window.innerHeight && rect.bottom > 0) {
+          renderCard(card);
+        }
+      }
+    });
   }
 
   function updateMarketMeta() {
@@ -1164,62 +1174,83 @@
   }
 
   /* ── Admin drag-and-drop reordering ──────────────────────────────────
-     Market rows and item rows are draggable, but a drag only starts from
-     the ⠿ handle so the row's buttons (select/rename/delete/remove) stay
-     clickable. Dropping onto another row inserts the dragged row above/
-     below it and persists the new order via PUT /api/markets/reorder or
-     PUT /api/markets/{id}/items/reorder. */
-  let adminDragFrom = null; // id (market or item) being dragged
+   Market rows and item rows are draggable. A drag only starts when the
+   user mouses down on the ⠿ handle, so the row's buttons (select, rename,
+   delete, remove) stay fully clickable. Dropping onto another row inserts
+   the dragged row above/below it and persists the new order via the
+   backend reorder endpoints. */
+let adminDragFrom = null; // id (market or item) being dragged
 
-  function clearAdminDropMarks() {
-    document.querySelectorAll(
-      '#market-list .drop-above, #market-list .drop-below, ' +
-      '#items-table .drop-above, #items-table .drop-below'
-    ).forEach((el) => el.classList.remove('drop-above', 'drop-below'));
-  }
+function clearAdminDropMarks() {
+  document.querySelectorAll(
+    '#market-list .drop-above, #market-list .drop-below, ' +
+    '#items-table .drop-above, #items-table .drop-below'
+  ).forEach((el) => el.classList.remove('drop-above', 'drop-below'));
+}
 
-  // Wire HTML5 DnD onto a row element. `payload` identifies the dragged
-  // row; `onDrop(fromId, toId, above)` persists the new order.
-  function setupAdminDrag(el, payload, onDrop) {
-    el.draggable = true;
-    el.addEventListener('dragstart', (e) => {
-      if (!e.target.closest('.drag-handle')) {
-        e.preventDefault(); // only the handle starts a drag
-        return;
-      }
-      adminDragFrom = payload;
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(payload));
-      el.classList.add('dragging');
-    });
-    el.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      clearAdminDropMarks();
-      adminDragFrom = null;
-    });
-    el.addEventListener('dragover', (e) => {
-      if (adminDragFrom === null || adminDragFrom === payload) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      const rect = el.getBoundingClientRect();
-      const above = e.clientY < rect.top + rect.height / 2;
-      el.classList.toggle('drop-above', above);
-      el.classList.toggle('drop-below', !above);
-    });
-    el.addEventListener('dragleave', () => {
-      el.classList.remove('drop-above', 'drop-below');
-    });
-    el.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (adminDragFrom === null || adminDragFrom === payload) return;
-      const rect = el.getBoundingClientRect();
-      const above = e.clientY < rect.top + rect.height / 2;
-      el.classList.remove('drop-above', 'drop-below');
-      const fromId = adminDragFrom;
-      adminDragFrom = null; // a drop is a one-shot; reset before re-render
-      onDrop(fromId, payload, above);
-    });
-  }
+// Global safety net: if a handle is pressed but the user releases without
+// dragging, clear the orphaned auth so the row can't be dragged later
+// from a non-handle mousedown.
+document.addEventListener('mouseup', () => {
+  document.querySelectorAll('[data-drag-auth]').forEach((el) => delete el.dataset.dragAuth);
+});
+
+function setupAdminDrag(el, payload, onDrop) {
+  const handle = el.querySelector('.drag-handle');
+  if (!handle) return;
+
+  // Only the handle authorises a drag for this specific row.
+  handle.addEventListener('mousedown', () => {
+    el.dataset.dragAuth = '1';
+  });
+
+  el.draggable = true;
+
+  el.addEventListener('dragstart', (e) => {
+    if (el.dataset.dragAuth !== '1') {
+      e.preventDefault(); // blocked — user didn't drag from the handle
+      return;
+    }
+    delete el.dataset.dragAuth; // consumed
+    adminDragFrom = payload;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(payload));
+    el.classList.add('dragging');
+  });
+
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    clearAdminDropMarks();
+    delete el.dataset.dragAuth;
+    adminDragFrom = null;
+  });
+
+  el.addEventListener('dragover', (e) => {
+    if (adminDragFrom === null || adminDragFrom === payload) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = el.getBoundingClientRect();
+    const above = e.clientY < rect.top + rect.height / 2;
+    el.classList.toggle('drop-above', above);
+    el.classList.toggle('drop-below', !above);
+  });
+
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drop-above', 'drop-below');
+  });
+
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (adminDragFrom === null || adminDragFrom === payload) return;
+    const rect = el.getBoundingClientRect();
+    const above = e.clientY < rect.top + rect.height / 2;
+    el.classList.remove('drop-above', 'drop-below');
+    const fromId = adminDragFrom;
+    adminDragFrom = null;
+    delete el.dataset.dragAuth;
+    onDrop(fromId, payload, above);
+  });
+}
 
   // Compute the new order by moving `fromId` to just before/after `toId`
   // in `ids`, then return the reordered list.

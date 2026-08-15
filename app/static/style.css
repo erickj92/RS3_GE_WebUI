@@ -119,7 +119,8 @@ select:focus, input:focus { outline: none; border-color: var(--green); }
 .market-row.drop-above { box-shadow: 0 -2px 0 0 var(--green); }
 .market-row.drop-below { box-shadow: 0 2px 0 0 var(--green); }
 
-/* box-shadow on <tr> doesn't render, so paint the drop line on its cells */
+/* box-shadow on <tr> doesn't render in some browsers, so paint the drop
+   line on its cells instead */
 #items-table tr.drop-above td { box-shadow: inset 0 2px 0 0 var(--green); }
 #items-table tr.drop-below td { box-shadow: inset 0 -2px 0 0 var(--green); }
 
