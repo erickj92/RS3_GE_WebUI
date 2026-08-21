@@ -189,8 +189,8 @@
   function getTimeFormatter(tz) {
     return new Intl.DateTimeFormat('en-US', {
       timeZone: tz,
-      hour12: false,
-      hour: '2-digit',
+      hour12: true,
+      hour: 'numeric',
       minute: '2-digit',
     });
   }
@@ -389,7 +389,8 @@
       tooltipEl.innerHTML =
         '<div style="color:#1a1a1a;font-size:14px;font-weight:600;margin-bottom:6px;' +
         'padding-bottom:6px;border-bottom:1px solid rgba(0,0,0,0.1)">' +
-        escapeHtml(estTime(S.timestamps[i])) + '</div>' +
+        escapeHtml(estTime(S.timestamps[i]).replace(' AM', 'AM').replace(' PM', 'PM') +
+        ' ' + getTzAbbr(currentTz)) + '</div>' +
         tooltipRow('Buy Price', actualValue(S, S.highReal, S.highPrice, i), ' GP', COLORS.green) +
         tooltipRow('Sell Price', actualValue(S, S.lowReal, S.lowPrice, i), ' GP', COLORS.orange) +
         tooltipRow('Buy Vol', actualValue(S, S.highVolReal, S.highVolume, i), '', COLORS.green) +
