@@ -8,6 +8,7 @@
   --text-bright: #e8e8e8;
   --green: #2ff259;
   --orange: #f2802f;
+  --blue: #4fc3f7;         /* market price (Weirdgloop guide price) */
   --border: rgba(171, 171, 171, 0.25);
   --input-bg: #2a2a2a;
   --hover-bg: #3d3d3d;
@@ -81,6 +82,9 @@ body {
 .btn.primary { border-color: rgba(47, 242, 89, 0.6); color: var(--green); }
 .btn.primary:hover { background: rgba(47, 242, 89, 0.08); }
 
+.btn.danger { border-color: rgba(242, 128, 47, 0.6); color: var(--orange); }
+.btn.danger:hover { background: rgba(242, 128, 47, 0.1); }
+
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 select, input[type="text"], input[type="number"] {
@@ -137,6 +141,7 @@ select:focus, input:focus { outline: none; border-color: var(--green); }
 .stat b { color: var(--text-bright); font-weight: 600; }
 .stat.buy b  { color: var(--green); }
 .stat.sell b { color: var(--orange); }
+.stat.mkt b  { color: var(--blue); }
 
 .chart-wrap { position: relative; width: 100%; }
 .chart-wrap.price  { height: 320px; }

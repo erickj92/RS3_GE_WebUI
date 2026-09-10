@@ -32,6 +32,25 @@
     <div id="charts"></div>
   </main>
 
+  <!-- Item-card template (cloned by makeCard in app.js). -->
+  <template id="card-template">
+    <article class="card">
+      <header class="card-head">
+        <img class="card-icon" alt="" loading="lazy">
+        <h2 class="card-title"></h2>
+      </header>
+      <div class="stats">
+        <span class="stat buy"><span class="lbl">Buy</span> <b class="val" data-stat="buy">—</b></span>
+        <span class="stat sell"><span class="lbl">Sell</span> <b class="val" data-stat="sell">—</b></span>
+        <span class="stat mkt"><span class="lbl">Market Price</span> <b class="val" data-stat="mkt">—</b></span>
+        <span class="stat vol"><span class="lbl">Vol (24h)</span> <b class="val" data-stat="vol">—</b></span>
+      </div>
+      <div class="chart-wrap price"><canvas></canvas></div>
+      <div class="chart-wrap volume"><canvas></canvas></div>
+      <div class="loading">Loading data…</div>
+    </article>
+  </template>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <script src="/static/app.js"></script>
 </body>

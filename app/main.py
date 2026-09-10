@@ -5,7 +5,9 @@ Routes:
   /admin                  Admin panel
   /api/markets            CRUD markets
   /api/markets/{id}/items CRUD items inside a market
+  /api/markets/{id}/items (DELETE)     Remove ALL items from a market
   /api/markets/{id}/items/{iid}/data   Chart-ready series for one item
+  /api/markets/{id}/market-prices      Live Weirdgloop market price per item
   /api/markets/{id}/refresh            Kick off a background data refresh
   /api/jobs/{job_id}      Poll refresh progress
   /api/lookup/{iid}       Live name/icon lookup from the RS Wiki mapping
@@ -279,11 +281,14 @@ def add_item(market_id: int, body: ItemAdd):
 
 @app.post("/api/markets/{market_id}/import")
 def import_items(market_id: int, body: ItemImport):
-    """Bulk-import item IDs into a market, in the order given.
+    """Bulk-import item IDs into a market, REPLACING its current items.
 
-    Each ID is looked up via the wiki mapping; only valid, not-yet-present
-    items are added.  The display order always follows the input list order.
-    Returns a per-category summary.
+    Importing overwrites: the market's existing items are wiped first, then
+    each ID is looked up via the wiki mapping and added fresh, in the order
+    given (the display order always follows the input list order).  The
+    mapping is fetched BEFORE anything is cleared, so a lookup failure
+    leaves the market untouched.  Returns a summary of the valid IDs added
+    and the invalid/unknown ones not found.
     """
     if not db.get_market(market_id):
         raise HTTPException(404, "Market not found")
@@ -293,16 +298,16 @@ def import_items(market_id: int, body: ItemImport):
     except Exception as exc:
         raise HTTPException(502, f"Could not fetch item mapping: {exc}")
 
+    # Overwrite semantics: drop every item currently in the market, then add
+    # the imported IDs fresh (so nothing is ever skipped as a duplicate).
+    db.clear_market_items(market_id)
+
     added: list[int] = []
-    skipped: list[int] = []
     not_found: list[int] = []
 
     for item_id in body.item_ids:
         if item_id <= 0:
             not_found.append(item_id)
-            continue
-        if db.get_market_item(market_id, item_id):
-            skipped.append(item_id)
             continue
         meta = mapping.get(item_id)
         if not meta:
@@ -313,7 +318,16 @@ def import_items(market_id: int, body: ItemImport):
             api_client.download_icon(meta["icon"])  # warm the cache
         added.append(item_id)
 
-    return {"added": added, "skipped": skipped, "not_found": not_found}
+    return {"added": added, "not_found": not_found}
+
+
+@app.delete("/api/markets/{market_id}/items")
+def clear_items(market_id: int):
+    """Remove ALL items from a market (the market itself is kept)."""
+    if not db.get_market(market_id):
+        raise HTTPException(404, "Market not found")
+    db.clear_market_items(market_id)
+    return {"ok": True}
 
 
 @app.delete("/api/markets/{market_id}/items/{item_id}")
@@ -327,6 +341,41 @@ def remove_item(market_id: int, item_id: int):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Chart data
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/markets/{market_id}/market-prices")
+def market_prices(market_id: int):
+    """Live "market price" for every item in a market.
+
+    The price comes from the Weirdgloop exchange API (the game's guide
+    price), not from our stored 24h history, so it is fetched on demand.
+    Returns {item_id: {"market_price": float, "market_volume": int}} for
+    the items the API knew about; unknown items are simply absent.
+    """
+    if not db.get_market(market_id):
+        raise HTTPException(404, "Market not found")
+
+    items = db.list_items(market_id)
+    names = [item["item_name"] for item in items if item["item_name"]]
+    if not names:
+        return {}
+
+    try:
+        prices = api_client.fetch_weirdgloop_prices(names)
+    except Exception as exc:  # noqa: BLE001 - report lookup failures to the UI
+        raise HTTPException(502, f"Could not fetch market prices: {exc}")
+
+    out: dict[str, dict] = {}
+    for item in items:
+        name = item["item_name"]
+        entry = prices.get(name) if name else None
+        if not entry:
+            continue
+        out[str(item["item_id"])] = {
+            "market_price": entry["price"],
+            "market_volume": entry["volume"],
+        }
+    return out
+
 
 @app.get("/api/markets/{market_id}/items/{item_id}/data")
 def item_data(market_id: int, item_id: int):
