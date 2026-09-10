@@ -849,7 +849,7 @@
 
   /* Rebuild the visible cards in *items* order.  Used when a market is
      selected (fresh, after the data cache was cleared). */
-  function rebuildCards(items) {
+  async function rebuildCards(items) {
     const chartsEl = document.getElementById('charts');
     for (const card of chartsEl.querySelectorAll('.card')) observer.unobserve(card);
     destroyAllCharts();
@@ -864,7 +864,7 @@
     // them from watchState. A failure must not block the charts; cards then
     // just show "—" for market price.
     try {
-      watchState.marketPrices = await api(`/api/markets/${id}/market-prices`);
+      watchState.marketPrices = await api(`/api/markets/${watchState.marketId}/market-prices`);
     } catch (err) {
       watchState.marketPrices = {};
     }
