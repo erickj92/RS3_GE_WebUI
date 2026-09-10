@@ -259,6 +259,25 @@ def delete_market(market_id: int) -> None:
         conn.commit()
 
 
+def clear_market_items(market_id: int) -> None:
+    """Remove ALL items from *market_id*, keeping the market itself.
+
+    Like delete_market's item cleanup, but the `markets` row and the
+    `market:<id>:last_refresh` meta entry both survive — the market stays,
+    it just becomes empty.  Price data is dropped only for items no other
+    market still tracks.
+    """
+    conn = get_conn()
+    with _lock:
+        conn.execute("DELETE FROM market_items WHERE market_id=?", (market_id,))
+        # Drop price data that no market references any more.
+        conn.execute(
+            "DELETE FROM price_data WHERE item_id NOT IN "
+            "(SELECT DISTINCT item_id FROM market_items)"
+        )
+        conn.commit()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Market items
 # ─────────────────────────────────────────────────────────────────────────────

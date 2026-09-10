@@ -685,6 +685,7 @@
   const watchState = {
     marketId: null,
     markets: [],
+    marketPrices: {},    // item_id (string) -> {market_price, market_volume}
     dataCache: new Map(), // item_id -> fetched payload
     charts: new Map(),    // item_id -> [priceChart, volumeChart]
     jobTimer: null,
@@ -703,24 +704,20 @@
     el.innerHTML = `<div class="empty">${html}</div>`;
   }
 
+  /* Build one item card by cloning the <template id="card-template"> in
+     index.html, so the stats markup (including the Market Price slot) has a
+     single source of truth. */
   function makeCard(item) {
-    const card = document.createElement('article');
-    card.className = 'card';
+    const tpl = document.getElementById('card-template');
+    const card = tpl.content.firstElementChild.cloneNode(true);
     card.dataset.itemId = item.item_id;
-    card.innerHTML =
-      '<header class="card-head">' +
-      `  <img class="card-icon" src="/icons/${encodeURIComponent(item.icon_name || '')}" ` +
-      '       alt="" loading="lazy" onerror="this.style.display=\'none\'">' +
-      `  <h2 class="card-title">${escapeHtml(item.item_name || 'Item ' + item.item_id)}</h2>` +
-      '</header>' +
-      '<div class="stats">' +
-      '  <span class="stat buy"><span class="lbl">Buy</span> <b class="val" data-stat="buy">—</b></span>' +
-      '  <span class="stat sell"><span class="lbl">Sell</span> <b class="val" data-stat="sell">—</b></span>' +
-      '  <span class="stat vol"><span class="lbl">Vol (24h)</span> <b class="val" data-stat="vol">—</b></span>' +
-      '</div>' +
-      '<div class="chart-wrap price"><canvas></canvas></div>' +
-      '<div class="chart-wrap volume"><canvas></canvas></div>' +
-      '<div class="loading">Loading data…</div>';
+
+    const img = card.querySelector('.card-icon');
+    img.src = `/icons/${encodeURIComponent(item.icon_name || '')}`;
+    img.addEventListener('error', () => { img.style.display = 'none'; });
+
+    card.querySelector('.card-title').textContent =
+      item.item_name || 'Item ' + item.item_id;
     return card;
   }
 
@@ -782,6 +779,14 @@
 
     card.querySelector('[data-stat="buy"]').textContent = fmtNum(data.stats.latest_buy);
     card.querySelector('[data-stat="sell"]').textContent = fmtNum(data.stats.latest_sell);
+    // Market price (Weirdgloop guide price) comes from the per-market map
+    // fetched by selectMarket(); the element may be absent on older cached
+    // card markup, so guard the lookup.
+    const mktEl = card.querySelector('[data-stat="mkt"]');
+    if (mktEl) {
+      const mkt = watchState.marketPrices[key] || null;
+      mktEl.textContent = mkt ? fmtNum(mkt.market_price) : '—';
+    }
     card.querySelector('[data-stat="vol"]').textContent = fmtNum(data.stats.total_volume);
     // Label the volume stat with the viewed window (24h / 7d / 30d).
     const period = data.period || watchState.period || '24h';
@@ -853,6 +858,17 @@
       showEmpty('No items in this market. <a href="/admin">Add items in the Admin panel</a>.');
       return;
     }
+
+    // Market prices are per-market and lightweight, so fetch them once here
+    // — BEFORE the cards are created/observed — and let paintCard() read
+    // them from watchState. A failure must not block the charts; cards then
+    // just show "—" for market price.
+    try {
+      watchState.marketPrices = await api(`/api/markets/${id}/market-prices`);
+    } catch (err) {
+      watchState.marketPrices = {};
+    }
+
     for (const item of items) {
       const card = makeCard(item);
       chartsEl.appendChild(card);
@@ -929,23 +945,41 @@
   }
 
   async function refreshMarket() {
-    if (!watchState.marketId) return;
+    if (!watchState.markets.length) return;
     const btn = document.getElementById('refresh-btn');
     const statusEl = document.getElementById('refresh-status');
     btn.disabled = true;
     btn.textContent = '⟳ Refreshing…';
-    statusEl.textContent = 'Starting…';
+    statusEl.textContent = `Starting ${watchState.markets.length} market refresh(es)…`;
 
-    let jobId;
-    try {
-      const j = await api(`/api/markets/${watchState.marketId}/refresh`, { method: 'POST' });
-      jobId = j.job_id;
-    } catch (err) {
-      statusEl.textContent = 'Refresh failed: ' + err.message;
+    // Kick off one job per market. A market that fails to start becomes an
+    // already-finished error entry so it cannot hold up the whole run.
+    const jobs = [];
+    for (const m of watchState.markets) {
+      try {
+        const j = await api(`/api/markets/${m.id}/refresh`, { method: 'POST' });
+        jobs.push({ name: m.name, jobId: j.job_id, state: 'queued',
+                    done: 0, total: 0, message: '' });
+      } catch (err) {
+        jobs.push({ name: m.name, jobId: null, state: 'error',
+                    done: 0, total: 0, message: err.message });
+      }
+    }
+
+    const finish = async () => {
+      clearInterval(watchState.jobTimer);
+      watchState.jobTimer = null;
       btn.disabled = false;
       btn.textContent = '⟳ Refresh';
-      return;
-    }
+      const errors = jobs.filter((j) => j.state === 'error');
+      if (errors.length) {
+        statusEl.textContent = 'Refresh error: ' +
+          errors.map((j) => `${j.name}: ${j.message}`).join('; ');
+        return;
+      }
+      statusEl.textContent = '';
+      await reloadAfterRefresh();
+    };
 
     stopRefreshPoll(); // never stack poll loops (period change can fire mid-refresh)
     watchState.jobTimer = setInterval(async () => {
@@ -964,6 +998,16 @@
           statusEl.textContent = '';
           await reloadAfterRefresh();
         }
+
+        const finished = jobs.filter((j) => j.state === 'done' || j.state === 'error').length;
+        const doneItems = jobs.reduce((a, j) => a + j.done, 0);
+        const totalItems = jobs.reduce((a, j) => a + j.total, 0);
+        const idx = Math.min(finished + 1, jobs.length);
+        statusEl.textContent =
+          `Refreshing market ${idx} of ${jobs.length}…` +
+          (totalItems ? ` (${doneItems}/${totalItems} items)` : '');
+
+        if (finished === jobs.length) await finish();
       } catch (err) {
         stopRefreshPoll();
         btn.disabled = false;
@@ -1178,9 +1222,9 @@
       });
       const parts = [];
       if (res.added.length) parts.push(`added ${res.added.length}`);
-      if (res.skipped.length) parts.push(`skipped ${res.skipped.length} (already present)`);
       if (res.not_found.length) parts.push(`not found ${res.not_found.length}`);
-      statusEl.textContent = 'Import done: ' + (parts.join(', ') || 'nothing to do');
+      statusEl.textContent = 'Import done (existing items replaced): ' +
+        (parts.join(', ') || 'nothing to do');
       input.value = '';
       adminState.markets = await api('/api/markets');
       renderMarketList();
@@ -1538,6 +1582,7 @@ function setupAdminDrag(el, payload, onDrop) {
     });
     document.getElementById('confirm-add-btn').addEventListener('click', addPendingItem);
     document.getElementById('import-form').addEventListener('submit', importItemsFile);
+    document.getElementById('clear-all-btn').addEventListener('click', clearAllItems);
 
     if (adminState.markets.length) {
       await selectAdminMarket(adminState.markets[0].id);

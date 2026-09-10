@@ -11,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -18,6 +19,12 @@ from . import db
 
 API_BASE = "https://prices.runescape.wiki/api/v2/rs"
 WIKI_IMG_BASE = "https://runescape.wiki/images"
+# Weirdgloop's exchange API serves the game's "market price" (the trading
+# post's guide price, distinct from the wiki's buy/sell averages).
+WEIRDLOOP_BASE = "https://api.weirdgloop.org/exchange/history/rs"
+# The latest endpoint takes repeated names joined by a pipe; chunk long
+# item lists so the URL stays a sane length.
+WEIRDLOOP_CHUNK_SIZE = 50
 # User-Agent sent with every request to the RS Wiki API; override via the
 # RS3GRAPH_USER_AGENT environment variable (see .env / README.md).
 USER_AGENT = os.environ.get(
@@ -116,6 +123,56 @@ def fetch_timeseries_many(
             except Exception as exc:  # noqa: BLE001 - one bad item must not kill the batch
                 failures[iid] = exc
     return results, failures
+
+
+def fetch_weirdgloop_prices(item_names: list[str]) -> dict[str, dict]:
+    """Fetch the latest Weirdgloop exchange price for many item names.
+
+    Calls ``/exchange/history/rs/latest?name=A|B|C`` (names percent-encoded
+    and joined by %7C) and returns ``{item_name: {"price": float,
+    "volume": int}}``.  Names the API does not know about are simply absent
+    from the result, and a failed chunk contributes no entries rather than
+    blowing up the whole call — the caller degrades to "no market price".
+
+    Requests are chunked (WEIRDLOOP_CHUNK_SIZE names each) to keep the URL
+    short.
+    """
+    names = [n for n in dict.fromkeys(item_names) if n]  # de-dup, keep order
+    prices: dict[str, dict] = {}
+
+    for start in range(0, len(names), WEIRDLOOP_CHUNK_SIZE):
+        chunk = names[start : start + WEIRDLOOP_CHUNK_SIZE]
+        # Percent-encode each name ourselves and join with %7C so the pipe
+        # separator (and spaces etc. inside names) is escaped exactly once.
+        query = "%7C".join(quote(n, safe="") for n in chunk)
+        url = f"{WEIRDLOOP_BASE}/latest?name={query}"
+        try:
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+        except (requests.RequestException, ValueError):
+            continue
+
+        # The endpoint normally returns {name: {price, volume, timestamp}};
+        # tolerate a {"data": {...}} wrapper too.
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            payload = payload["data"]
+        if not isinstance(payload, dict):
+            continue
+
+        for name, entry in payload.items():
+            if not isinstance(entry, dict):
+                continue
+            price = entry.get("price")
+            if price is None:
+                continue
+            volume = entry.get("volume")
+            prices[name] = {
+                "price": float(price),
+                "volume": int(volume) if volume is not None else 0,
+            }
+
+    return prices
 
 
 def icon_filename(icon_name: str) -> str:
