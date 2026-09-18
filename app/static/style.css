@@ -274,3 +274,32 @@ select:focus, input:focus { outline: none; border-color: var(--green); }
 .muted { opacity: 0.65; }
 .small { font-size: 12px; }
 .error { color: var(--orange); font-size: 13px; }
+
+/* ── Array-paste modal (admin) ───────────────────────────────────────── */
+
+dialog.array-modal {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px 20px 16px;
+  width: min(460px, 92vw);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.6);
+}
+
+dialog.array-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
+
+dialog.array-modal h3 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  color: var(--text-bright);
+}
+
+dialog.array-modal p { margin: 0 0 16px; font-size: 14px; }
+
+.array-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}

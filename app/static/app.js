@@ -482,14 +482,29 @@
 
   const indexInteraction = { mode: 'index', intersect: false };
 
+  /* Cut a series off after its last REAL data point: every value past it
+     becomes null, which Chart.js renders as a gap, so the line stops there
+     instead of running flat to the right edge on gap-filled values. */
+  function truncateAfterLastReal(arr, realMask) {
+    const last = realMask.lastIndexOf(true);
+    if (last === -1) return arr.map(() => null);
+    return arr.map((v, i) => (i <= last ? v : null));
+  }
+
   /* ── Price chart ──────────────────────────────────────────────────── */
 
-  function buildPriceChart(canvas, data) {
+  function buildPriceChart(canvas, data, marketPrice) {
     const S = data.series;
+
+    // The buy/sell LINES stop at the last real data point (no extrapolation
+    // past it); the marker datasets below keep the untruncated arrays so the
+    // real dots are still drawn. Volume bars are never truncated.
+    const buyData = truncateAfterLastReal(S.highPrice, S.highReal);
+    const sellData = truncateAfterLastReal(S.lowPrice, S.lowReal);
 
     const buyLine = {
       label: 'Buy Price',
-      data: xy(S, S.highPrice),
+      data: xy(S, buyData),
       borderColor: COLORS.green,
       backgroundColor: COLORS.green,
       borderWidth: 2,
@@ -500,7 +515,7 @@
     };
     const sellLine = {
       label: 'Sell Price',
-      data: xy(S, S.lowPrice),
+      data: xy(S, sellData),
       borderColor: COLORS.orange,
       backgroundColor: COLORS.orange,
       borderWidth: 2,
@@ -525,11 +540,33 @@
       order: 1,
     });
 
+    const datasets = [
+      buyLine,
+      sellLine,
+      mk(COLORS.green, S.highPrice, S.highReal),
+      mk(COLORS.orange, S.lowPrice, S.lowReal),
+    ];
+
+    // Horizontal blue "Market Price" line (the Weirdgloop guide price also
+    // shown in the stats bar). It is intentionally NOT part of the fixed
+    // four-row external tooltip built by renderExternalTooltip().
+    if (marketPrice !== null && marketPrice !== undefined) {
+      datasets.push({
+        label: 'Market Price',
+        data: S.timestamps.map((t) => ({ x: t, y: marketPrice })),
+        borderColor: '#2196F3',
+        backgroundColor: '#2196F3',
+        borderWidth: 2,
+        tension: 0,
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        order: 3,
+      });
+    }
+
     const chart = new Chart(canvas, {
       type: 'line',
-      data: {
-        datasets: [buyLine, sellLine, mk(COLORS.green, S.highPrice, S.highReal), mk(COLORS.orange, S.lowPrice, S.lowReal)],
-      },
+      data: { datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -718,18 +755,20 @@
     card.querySelector('[data-stat="buy"]').textContent = fmtNum(data.stats.latest_buy);
     card.querySelector('[data-stat="sell"]').textContent = fmtNum(data.stats.latest_sell);
     // Market price (Weirdgloop guide price) comes from the per-market map
-    // fetched by selectMarket(); the element may be absent on older cached
-    // card markup, so guard the lookup.
+    // fetched by selectMarket(); it feeds BOTH the stats bar and the blue
+    // "Market Price" line drawn across the price chart. May be null (item
+    // unknown to the API), in which case no line is drawn.
+    const mkt = watchState.marketPrices[key] || null;
+    const marketPrice = mkt ? mkt.market_price : null;
     const mktEl = card.querySelector('[data-stat="mkt"]');
     if (mktEl) {
-      const mkt = watchState.marketPrices[key] || null;
       mktEl.textContent = mkt ? fmtNum(mkt.market_price) : '—';
     }
     card.querySelector('[data-stat="vol"]').textContent = fmtNum(data.stats.total_volume);
 
     const priceCanvas = card.querySelector('.chart-wrap.price canvas');
     const volCanvas = card.querySelector('.chart-wrap.volume canvas');
-    const priceChart = buildPriceChart(priceCanvas, data);
+    const priceChart = buildPriceChart(priceCanvas, data, marketPrice);
     const volChart = buildVolumeChart(volCanvas, data);
 
     // Let Chart.js compute natural widths once, then pin both axes to the
@@ -835,75 +874,62 @@
     await selectMarket(watchState.marketId);
   }
 
-  /* Refresh EVERY market, not just the selected one.
+  /* Refresh EVERY market in ONE background job.
 
-     One background job is kicked off per market (the server runs them
-     concurrently); we then poll them all together, report overall progress
-     ("Refreshing market X of Y…"), and keep the button disabled until every
-     job has finished. Only then do we reload the market list and charts. */
+     The server collects the unique item IDs across all markets, so an item
+     tracked by several markets is fetched only once. We poll the single job
+     for progress ("done/total" items) and keep the button disabled until it
+     finishes; only then do we reload the market list and charts. */
   async function refreshMarket() {
     if (!watchState.markets.length) return;
     const btn = document.getElementById('refresh-btn');
     const statusEl = document.getElementById('refresh-status');
     btn.disabled = true;
     btn.textContent = '⟳ Refreshing…';
-    statusEl.textContent = `Starting ${watchState.markets.length} market refresh(es)…`;
+    statusEl.textContent = 'Starting refresh…';
 
-    // Kick off one job per market. A market that fails to start becomes an
-    // already-finished error entry so it cannot hold up the whole run.
-    const jobs = [];
-    for (const m of watchState.markets) {
-      try {
-        const j = await api(`/api/markets/${m.id}/refresh`, { method: 'POST' });
-        jobs.push({ name: m.name, jobId: j.job_id, state: 'queued',
-                    done: 0, total: 0, message: '' });
-      } catch (err) {
-        jobs.push({ name: m.name, jobId: null, state: 'error',
-                    done: 0, total: 0, message: err.message });
-      }
+    let job;
+    try {
+      job = await api('/api/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ market_ids: watchState.markets.map((m) => m.id) }),
+      });
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '⟳ Refresh';
+      statusEl.textContent = 'Refresh failed: ' + err.message;
+      return;
     }
 
-    const finish = async () => {
+    const jobId = job.job_id;
+
+    const finish = async (error, message) => {
       clearInterval(watchState.jobTimer);
       watchState.jobTimer = null;
       btn.disabled = false;
       btn.textContent = '⟳ Refresh';
-      const errors = jobs.filter((j) => j.state === 'error');
-      if (errors.length) {
-        statusEl.textContent = 'Refresh error: ' +
-          errors.map((j) => `${j.name}: ${j.message}`).join('; ');
+      if (error) {
+        statusEl.textContent = 'Refresh error: ' + error;
         return;
       }
-      statusEl.textContent = '';
       await reloadAfterRefresh();
+      // Set AFTER the reload: selectMarket() clears the status line.
+      statusEl.textContent = message || '';
     };
 
     watchState.jobTimer = setInterval(async () => {
       try {
-        for (const job of jobs) {
-          if (!job.jobId || job.state === 'done' || job.state === 'error') continue;
-          const st = await api(`/api/jobs/${job.jobId}`);
-          job.state = st.state;
-          job.done = st.done || 0;
-          job.total = st.total || 0;
-          if (st.state === 'error') job.message = st.message || 'unknown error';
+        const st = await api(`/api/jobs/${jobId}`);
+        if (st.state === 'error') {
+          await finish(st.message || 'unknown error');
+          return;
         }
-
-        const finished = jobs.filter((j) => j.state === 'done' || j.state === 'error').length;
-        const doneItems = jobs.reduce((a, j) => a + j.done, 0);
-        const totalItems = jobs.reduce((a, j) => a + j.total, 0);
-        const idx = Math.min(finished + 1, jobs.length);
         statusEl.textContent =
-          `Refreshing market ${idx} of ${jobs.length}…` +
-          (totalItems ? ` (${doneItems}/${totalItems} items)` : '');
-
-        if (finished === jobs.length) await finish();
+          `Refreshing… (${st.done || 0}/${st.total || 0})`;
+        if (st.state === 'done') await finish(null, st.message);
       } catch (err) {
-        clearInterval(watchState.jobTimer);
-        watchState.jobTimer = null;
-        btn.disabled = false;
-        btn.textContent = '⟳ Refresh';
-        statusEl.textContent = 'Progress poll failed: ' + err.message;
+        await finish('progress poll failed: ' + err.message);
       }
     }, 800);
   }
@@ -960,7 +986,82 @@
     markets: [],
     currentMarketId: null,
     pendingAdd: null,
+    pendingArray: null, // parsed IDs from a pasted JSON array awaiting a mode
   };
+
+  /* Parse a pasted JSON array of item IDs into positive integers.
+     Accepts numbers and numeric strings (e.g. ["57127","57022"]). Throws on
+     malformed JSON, a non-array, an empty array, or any element that is not
+     a positive integer. Duplicates are collapsed (order is preserved). */
+  function parseItemIdArray(text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      throw new Error('Invalid JSON array: ' + err.message);
+    }
+    if (!Array.isArray(parsed)) throw new Error('That is not a JSON array.');
+    const ids = parsed.map((el) => {
+      if (el !== null && typeof el === 'object') {
+        throw new Error('Array contains a non-numeric entry.');
+      }
+      const raw = typeof el === 'string' ? el.trim() : el;
+      const n = Number(raw);
+      if (raw === '' || typeof el === 'boolean' || !Number.isSafeInteger(n) || n <= 0) {
+        throw new Error(`Not a positive integer item ID: ${String(el)}`);
+      }
+      return n;
+    });
+    if (!ids.length) throw new Error('Array contains no item IDs.');
+    return [...new Set(ids)];
+  }
+
+  /* Array-paste modal (Overwrite / Append / Cancel). Only ever opened for
+     JSON-array input — a single item ID keeps the normal lookup flow. */
+  function openArrayModal(ids) {
+    adminState.pendingArray = ids;
+    document.getElementById('array-modal-text').textContent =
+      `Array detected with ${ids.length} item IDs. How would you like to add them?`;
+    const dlg = document.getElementById('array-modal');
+    if (typeof dlg.showModal === 'function') dlg.showModal();
+    else dlg.setAttribute('open', ''); // very old browsers: inline fallback
+  }
+
+  function closeArrayModal() {
+    const dlg = document.getElementById('array-modal');
+    if (typeof dlg.close === 'function' && dlg.open) dlg.close();
+    else dlg.removeAttribute('open');
+  }
+
+  async function submitArrayImport(mode) {
+    const ids = adminState.pendingArray;
+    const statusEl = document.getElementById('import-status');
+    const errEl = document.getElementById('lookup-error');
+    closeArrayModal();
+    adminState.pendingArray = null;
+    if (!adminState.currentMarketId || !ids || !ids.length) return;
+
+    try {
+      const res = await api(`/api/markets/${adminState.currentMarketId}/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_ids: ids, mode }),
+      });
+      const parts = [];
+      if (res.added.length) parts.push(`added ${res.added.length}`);
+      if (res.not_found.length) parts.push(`not found ${res.not_found.length}`);
+      statusEl.textContent =
+        (mode === 'append' ? 'Append done' : 'Overwrite done') + ': ' +
+        (parts.join(', ') || 'nothing to do');
+      errEl.textContent = '';
+      document.getElementById('add-item-id').value = '';
+      adminState.markets = await api('/api/markets');
+      renderMarketList();
+      await reloadItemsTable();
+    } catch (err) {
+      statusEl.textContent = 'Import failed: ' + err.message;
+    }
+  }
 
   /* Import a text file of item IDs into the current market. Accepts either
      one item ID per line, or a JSON array of IDs (strings and/or numbers),
@@ -1243,13 +1344,34 @@
 
   async function lookupItem() {
     const input = document.getElementById('add-item-id');
-    const id = Number(input.value);
+    const raw = input.value.trim();
     const errEl = document.getElementById('lookup-error');
     const preview = document.getElementById('lookup-preview');
     errEl.textContent = '';
+    preview.hidden = true;
+
+    // A pasted JSON array (trimmed value starts with "[" and ends with "]")
+    // opens the Overwrite / Append / Cancel modal instead of the single-item
+    // lookup flow. Anything else is treated as one item ID, exactly as before.
+    if (raw.startsWith('[') && raw.endsWith(']')) {
+      let ids;
+      try {
+        ids = parseItemIdArray(raw);
+      } catch (err) {
+        errEl.textContent = err.message;
+        return;
+      }
+      if (!adminState.currentMarketId) {
+        errEl.textContent = 'Select a market first.';
+        return;
+      }
+      openArrayModal(ids);
+      return;
+    }
+
+    const id = Number(raw);
     if (!Number.isInteger(id) || id <= 0) {
       errEl.textContent = 'Enter a valid item ID.';
-      preview.hidden = true;
       return;
     }
     try {
@@ -1295,6 +1417,18 @@
       if (e.key === 'Enter') { e.preventDefault(); lookupItem(); }
     });
     document.getElementById('confirm-add-btn').addEventListener('click', addPendingItem);
+    document.getElementById('array-overwrite-btn').addEventListener('click',
+      () => submitArrayImport('replace'));
+    document.getElementById('array-append-btn').addEventListener('click',
+      () => submitArrayImport('append'));
+    document.getElementById('array-cancel-btn').addEventListener('click', () => {
+      adminState.pendingArray = null;
+      closeArrayModal();
+    });
+    // Esc closes the dialog without choosing: drop the pending array too.
+    document.getElementById('array-modal').addEventListener('close', () => {
+      adminState.pendingArray = null;
+    });
     document.getElementById('import-form').addEventListener('submit', importItemsFile);
     document.getElementById('clear-all-btn').addEventListener('click', clearAllItems);
 
