@@ -11,6 +11,8 @@ Routes:
   /api/markets/{id}/items/{iid}/data   Chart-ready series for one item
   /api/markets/{id}/market-prices      Live Weirdgloop market price per item
   /api/markets/{id}/refresh            Kick off a background data refresh
+  /api/refresh                         Refresh ALL given markets in one job
+                                       (each unique item fetched only once)
   /api/jobs/{job_id}      Poll refresh progress
   /api/lookup/{iid}       Live name/icon lookup from the RS Wiki mapping
   /icons/{filename}       Cached item icons (downloaded on demand)
@@ -238,6 +240,110 @@ def _run_refresh(job_id: str, market_id: int) -> None:
 #  Startup seeding
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_refresh_all(job_id: str, market_ids: list[int]) -> None:
+    """Refresh every UNIQUE item across *market_ids* in one background job.
+
+    An item tracked by several markets is fetched exactly once; its price
+    data is global (keyed by item_id) while its name/icon are updated for
+    every market that contains it.  When the job finishes, `last_refresh`
+    is stamped for every market in the request.
+    """
+    markets = [mid for mid in market_ids if db.get_market(mid)]
+
+    # Unique items, preserving first-seen order, plus the reverse map from
+    # item_id to every market that tracks it (needed to update each
+    # market's stored name/icon).
+    items_by_id: dict[int, dict] = {}
+    item_markets: dict[int, list[int]] = {}
+    for mid in markets:
+        for item in db.list_items(mid):
+            item_id = item["item_id"]
+            items_by_id.setdefault(item_id, item)
+            item_markets.setdefault(item_id, []).append(mid)
+
+    items = list(items_by_id.values())
+    total = len(items)
+
+    if total == 0:
+        for mid in markets:
+            db.set_meta(f"market:{mid}:last_refresh", _now_iso())
+        _set_job(job_id, state="done", total=0, done=0, current="",
+                 message="No items to refresh")
+        return
+
+    _set_job(job_id, state="running", total=total, done=0, current="")
+
+    try:
+        # Names/icons come from the mapping; a failure here is not fatal,
+        # we just keep whatever is stored.
+        try:
+            mapping = api_client.fetch_mapping()
+        except Exception:
+            mapping = None
+
+        cutoff = int(time.time()) - 24 * 3600  # keep only the last 24h
+
+        done = 0
+        for start in range(0, total, REFRESH_CHUNK_SIZE):
+            chunk = items[start : start + REFRESH_CHUNK_SIZE]
+            chunk_ids = [item["item_id"] for item in chunk]
+            chunk_end = min(start + len(chunk), total)
+            _set_job(
+                job_id,
+                done=done,
+                current=f"Fetching {start + 1}-{chunk_end} of {total}…",
+            )
+
+            data_map, failures = api_client.fetch_timeseries_many(chunk_ids)
+            if failures:
+                _set_job(
+                    job_id,
+                    current=f"{len(failures)} item(s) failed to fetch, keeping old data…",
+                )
+
+            for item in chunk:
+                item_id = item["item_id"]
+                label = item["item_name"] or f"Item {item_id}"
+                done += 1
+                _set_job(job_id, done=done, current=label)
+
+                # Skip failed fetches entirely so stored data is preserved.
+                data = data_map.get(item_id)
+                if data is None:
+                    continue
+                rows = [
+                    (
+                        e.get("timestamp"),
+                        e.get("avgHighPrice"),
+                        e.get("avgLowPrice"),
+                        e.get("highPriceVolume"),
+                        e.get("lowPriceVolume"),
+                    )
+                    for e in data
+                ]
+                db.replace_price_data(item_id, rows)
+                db.cleanup_old(item_id, cutoff)
+
+                # Keep stored names/icons in sync with the wiki mapping,
+                # in EVERY market that tracks this item.
+                if mapping and item_id in mapping:
+                    m = mapping[item_id]
+                    for mid in item_markets.get(item_id, []):
+                        db.update_item_meta(mid, item_id, m["name"], m["icon"] or None)
+                    if m.get("icon"):
+                        api_client.download_icon(m["icon"])
+
+            if chunk_end < total:
+                time.sleep(REFRESH_CHUNK_DELAY_S)  # be polite between waves
+
+        for mid in markets:
+            db.set_meta(f"market:{mid}:last_refresh", _now_iso())
+        _set_job(job_id, state="done", done=total, current="",
+                 message=f"Refreshed {total} unique item(s)")
+    except Exception as exc:  # noqa: BLE001 - report any failure to the UI
+        _set_job(job_id, state="error", current="", message=str(exc))
+
+
 def _enrich_seed(market_id: int) -> None:
     """Fill in real names/icons for the seeded items in the background."""
     try:
@@ -413,12 +519,16 @@ def update_market_settings(market_id: int, body: MarketSettings):
 
 @app.post("/api/markets/{market_id}/import")
 def import_items(market_id: int, body: ItemImport):
-    """Bulk-import item IDs into a market, REPLACING its current items.
+    """Bulk-import item IDs into a market.
 
-    Importing overwrites: the market's existing items are wiped first, then
-    each ID is looked up via the wiki mapping and added fresh, in the order
-    given (the display order always follows the input list order).  The
-    mapping is fetched BEFORE anything is cleared, so a lookup failure
+    `body.mode` selects how the list is applied:
+      - "replace" (default): the market's existing items are wiped first,
+        then each ID is looked up via the wiki mapping and added fresh, in
+        the order given (the display order always follows the input list
+        order).
+      - "append": the market's current items are kept and the imported IDs
+        are added on top of them.
+    The mapping is fetched BEFORE anything is cleared, so a lookup failure
     leaves the market untouched.  Returns a summary of the valid IDs added
     and the invalid/unknown ones not found.
     """
@@ -430,9 +540,12 @@ def import_items(market_id: int, body: ItemImport):
     except Exception as exc:
         raise HTTPException(502, f"Could not fetch item mapping: {exc}")
 
-    # Overwrite semantics: drop every item currently in the market, then add
+    # "replace" semantics: drop every item currently in the market, then add
     # the imported IDs fresh (so nothing is ever skipped as a duplicate).
-    db.clear_market_items(market_id)
+    # "append" keeps the existing items, so a duplicate ID is simply ignored
+    # by db.add_item's INSERT OR IGNORE.
+    if body.mode != "append":
+        db.clear_market_items(market_id)
 
     added: list[int] = []
     not_found: list[int] = []
@@ -565,6 +678,31 @@ def refresh_market(market_id: int):
     if not db.get_market(market_id):
         raise HTTPException(404, "Market not found")
     job_id = _start_refresh_job(market_id)
+    return {"job_id": job_id}
+
+
+@app.post("/api/refresh")
+def refresh_all(body: RefreshAll):
+    """Refresh every market in *body.market_ids* with ONE background job.
+
+    Items shared between markets are fetched only once (they are keyed by
+    item_id, so the stored series is shared anyway).  Progress reports
+    `total` = number of unique items and `done` = items processed; on
+    completion `last_refresh` is stamped for every requested market.
+    """
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "state": "queued",
+            "total": 0,
+            "done": 0,
+            "current": "",
+            "message": "",
+        }
+    threading.Thread(
+        target=_run_refresh_all, args=(job_id, list(body.market_ids)), daemon=True
+    ).start()
     return {"job_id": job_id}
 
 

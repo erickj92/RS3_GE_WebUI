@@ -29,7 +29,7 @@
       <h2 id="panel-title">Select a market</h2>
 
       <form id="add-item-form" class="inline-form">
-        <input id="add-item-id" type="number" placeholder="Item ID (e.g. 4151)" min="1" step="1" required>
+        <input id="add-item-id" type="text" placeholder="Item ID or JSON array" required>
         <button class="btn" type="button" id="lookup-btn">🔍 Lookup</button>
       </form>
       <div id="lookup-preview" class="lookup-preview" hidden>
@@ -56,6 +56,17 @@
       <p class="muted small">Drag ⠿ to reorder items within this market.</p>
     </section>
   </main>
+
+  <!-- Shown only when a JSON array is pasted into the item-ID field. -->
+  <dialog id="array-modal" class="array-modal">
+    <h3 id="array-modal-title">Array detected</h3>
+    <p id="array-modal-text" class="muted"></p>
+    <div class="array-modal-actions">
+      <button id="array-overwrite-btn" class="btn danger" type="button">Overwrite</button>
+      <button id="array-append-btn" class="btn primary" type="button">Append</button>
+      <button id="array-cancel-btn" class="btn" type="button">Cancel</button>
+    </div>
+  </dialog>
 
   <script src="/static/app.js"></script>
 </body>
