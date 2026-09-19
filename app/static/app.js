@@ -1623,6 +1623,24 @@ function setupAdminDrag(el, payload, onDrop) {
     }
   }
 
+  async function clearAllItems() {
+    const statusEl = document.getElementById('import-status');
+    if (!adminState.currentMarketId) {
+      statusEl.textContent = 'Select a market first.';
+      return;
+    }
+    if (!confirm('Are you sure?')) return;
+    try {
+      await api(`/api/markets/${adminState.currentMarketId}/items`, { method: 'DELETE' });
+      statusEl.textContent = '';
+      adminState.markets = await api('/api/markets');
+      renderMarketList();
+      await reloadItemsTable();
+    } catch (err) {
+      statusEl.textContent = 'Clear failed: ' + err.message;
+    }
+  }
+
   async function removeItem(itemId) {
     if (!adminState.currentMarketId) return;
     try {
